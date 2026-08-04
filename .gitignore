@@ -1,0 +1,27 @@
+# === C++ ===
+build/
+out/
+bin/
+obj/
+*.o
+*.exe
+*.out
+.vs/
+
+# === Go ===
+watchdog-go/bin/
+watchdog-go/obj/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# === C# / .NET ===
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
