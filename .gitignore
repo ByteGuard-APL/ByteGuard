@@ -25,3 +25,6 @@ env/
 [Oo]bj/
 *.user
 *.suo
+
+# === Test & Mocks ===
+TestFiles/
