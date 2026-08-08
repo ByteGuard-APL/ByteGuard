@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Copia analyzer.py nella cartella di output della build accanto all'eseguibile.
+      Percorso sorgente : ..\Python\analyzer.py  (relativo a ByteGuard.csproj)
+      Percorso destinaz.: bin\Debug\net8.0-windows\Python\analyzer.py
+      PreserveNewest    : copia solo se il file sorgente è più recente, evitando
+                          ricompilazioni inutili ad ogni build.
+      Link              : definisce il percorso virtuale nel progetto VS Code.
+    -->
+    <Content Include="..\Python\analyzer.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Python\analyzer.py</Link>
+    </Content>
+  </ItemGroup>
+
+</Project>
