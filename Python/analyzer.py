@@ -31,8 +31,11 @@ MAGIC_NUMBERS: dict[str, bytes] = {
     ".jpeg": b"\xff\xd8\xff",
     ".zip":  b"PK\x03\x04",
     ".exe":  b"MZ",
+    ".dll":  b"MZ",          # PE format, come gli exe
+    ".sys":  b"MZ",          # PE format, driver di sistema
     ".elf":  b"\x7fELF",
     ".docx": b"PK\x03\x04",  # docx e' un archivio zip rinominato
+    ".xlsx": b"PK\x03\x04",  # xlsx e' un archivio zip rinominato
     ".gz":   b"\x1f\x8b",
 }
 
@@ -42,10 +45,6 @@ MAGIC_BYTES_READ_COUNT = 16
 # Soglia oltre la quale si usa il campionamento invece della lettura completa.
 # Sotto questa dimensione il file viene letto intero: e' veloce e preciso al 100%.
 SAMPLING_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100 MB
-
-# Dimensione di ogni chunk campionato. Con 3 chunks da 1 MB si leggono in totale
-# 3 MB indipendentemente da quanto e' grande il file (100 MB, 10 GB: uguale).
-SAMPLE_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MB per chunk
 
 
 def calculate_shannon_entropy(data: bytes) -> float:
@@ -75,37 +74,34 @@ def calculate_shannon_entropy(data: bytes) -> float:
     return entropy
 
 
-def read_sampled_content(f: io.RawIOBase, file_size: int) -> bytes:
+def read_sampled_content(f: io.BufferedReader, file_size: int) -> bytes:
     """
-    Legge tre chunk dal file (inizio, meta', fine) e li concatena.
-    Usato per file grandi al posto della lettura completa.
-
-    Perche' 3 zone e non una sola?
-    - I file cifrati o compressi hanno distribuzione uniforme ovunque:
-      qualsiasi zona e' rappresentativa. Ma per file strutturati (es. ISO,
-      database) le zone hanno caratteristiche diverse: campionare solo
-      l'inizio darebbe un risultato distorto.
-    - Inizio + meta' + fine bilancia copertura e velocita'.
-
-    Limite noto: un payload cifrato nascosto SOLO nella zona centrale di un
-    file altrimenti normale potrebbe sfuggire se i chunk non lo coprono.
-    Per analisi forensi ad alta precisione, usare la lettura completa.
+    Legge tre chunk dal file (inizio, meta', fine) calcolandone dinamicamente
+    la dimensione in percentuale rispetto al file totale.
     """
+    # Chunk dinamico: 1% della dimensione del file per ogni chunk (totale 3%).
+    # Limiti di sicurezza RAM: minimo 1 MB, massimo 50 MB a chunk.
+    # Es. File da 10 GB -> 1% = 100 MB -> Capped a 50 MB -> Totale RAM usata: 150 MB.
+    base_chunk_size = int(file_size * 0.01)
+    min_chunk = 1 * 1024 * 1024   # 1 MB
+    max_chunk = 50 * 1024 * 1024  # 50 MB
+    chunk_size = max(min_chunk, min(base_chunk_size, max_chunk))
+    
     chunks = bytearray()
 
     positions = [
-        0,                              # inizio
-        max(0, file_size // 2 - SAMPLE_CHUNK_BYTES // 2),  # meta'
-        max(0, file_size - SAMPLE_CHUNK_BYTES),             # fine
+        0,                                        # inizio
+        max(0, file_size // 2 - chunk_size // 2), # meta'
+        max(0, file_size - chunk_size),           # fine
     ]
 
     seen: set[int] = set()
     for pos in positions:
         if pos in seen:
-            continue  # evita duplicati su file piccoli (non dovrebbe accadere sopra soglia)
+            continue  # evita duplicati su file piccoli
         seen.add(pos)
         f.seek(pos)
-        chunks += f.read(SAMPLE_CHUNK_BYTES)
+        chunks += f.read(chunk_size)
 
     return bytes(chunks)
 

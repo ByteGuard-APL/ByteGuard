@@ -30,7 +30,7 @@ namespace ByteGuard
         // File con estensioni diverse verranno scartati a monte per evitare falsi positivi.
         private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
-            ".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".png",
+            ".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".jpeg", ".png",
             ".exe", ".elf", ".dll", ".sys",
             ".txt", ".json", ".xml", ".csv", ".html"
         };
@@ -40,7 +40,7 @@ namespace ByteGuard
             string ext = (extension ?? "").ToLowerInvariant();
             return ext switch
             {
-                ".pdf" or ".zip" or ".gz" or ".docx" or ".xlsx" or ".jpg" or ".png" => EntropyProfile.Compresso,
+                ".pdf" or ".zip" or ".gz" or ".docx" or ".xlsx" or ".jpg" or ".jpeg" or ".png" => EntropyProfile.Compresso,
                 ".exe" or ".elf" or ".dll" or ".sys" => EntropyProfile.Eseguibile,
                 ".txt" or ".json" or ".xml" or ".csv" or ".html" => EntropyProfile.Testo,
                 _ => EntropyProfile.Eseguibile
@@ -215,6 +215,11 @@ namespace ByteGuard
                             isAnomalous = true;
                             verdict = "Entropia troppo alta per un testo";
                         }
+                        else if (profile == EntropyProfile.Testo && e < 1.0) 
+                        {
+                            isAnomalous = true;
+                            verdict = "Testo anomalo (ripetizioni o padding nullo)";
+                        }
                         else if (profile == EntropyProfile.Eseguibile && e > 7.2) 
                         {
                             isAnomalous = true;
@@ -229,6 +234,11 @@ namespace ByteGuard
                         {
                             isAnomalous = true;
                             verdict = "Falso compresso (entropia bassissima)";
+                        }
+                        else if (profile == EntropyProfile.Compresso && e > 7.98) 
+                        {
+                            isAnomalous = true;
+                            verdict = "File fortemente cifrato (entropia estrema)";
                         }
                         
                         // Il sanity check ha la precedenza assoluta
