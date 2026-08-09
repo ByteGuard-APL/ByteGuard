@@ -79,13 +79,13 @@ namespace ByteGuard.Services
         [JsonIgnore]
         public string DisplayStatus => IsSuccess ? "Completato" : "Errore";
         
-        // Flag impostato dalla UI per evidenziare visivamente la riga
-        [JsonIgnore]
-        public bool IsAnomalous { get; set; }
+        // Flag calcolato dal motore Python per evidenziare visivamente la riga
+        [JsonPropertyName("is_anomalous")]
+        public bool IsAnomalous { get; init; }
 
-        // Testo esplicativo dell'anomalia per la DataGrid
-        [JsonIgnore]
-        public string Verdict { get; set; } = "Sano";
+        // Testo esplicativo dell'anomalia determinato dal motore Python
+        [JsonPropertyName("verdict")]
+        public string Verdict { get; init; } = "Sano";
     }
 
     public class PythonAnalyzerService

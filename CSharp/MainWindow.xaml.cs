@@ -23,9 +23,6 @@ namespace ByteGuard
         // la DataGrid ogni volta che viene aggiunto un nuovo elemento.
         public ObservableCollection<AnalysisResult> ScannedFiles { get; } = new ObservableCollection<AnalysisResult>();
 
-        // Profili di entropia
-        private enum EntropyProfile { Testo, Eseguibile, Compresso }
-
         // Elenco delle estensioni ufficialmente supportate e gestite dal motore.
         // File con estensioni diverse verranno scartati a monte per evitare falsi positivi.
         private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -34,18 +31,6 @@ namespace ByteGuard
             ".exe", ".elf", ".dll", ".sys",
             ".txt", ".json", ".xml", ".csv", ".html"
         };
-
-        private static EntropyProfile GetExpectedProfile(string? extension)
-        {
-            string ext = (extension ?? "").ToLowerInvariant();
-            return ext switch
-            {
-                ".pdf" or ".zip" or ".gz" or ".docx" or ".xlsx" or ".jpg" or ".jpeg" or ".png" => EntropyProfile.Compresso,
-                ".exe" or ".elf" or ".dll" or ".sys" => EntropyProfile.Eseguibile,
-                ".txt" or ".json" or ".xml" or ".csv" or ".html" => EntropyProfile.Testo,
-                _ => EntropyProfile.Eseguibile
-            };
-        }
 
         // Palette Colori
         private static readonly SolidColorBrush BrushOk      = new SolidColorBrush(Color.FromRgb(0x2E, 0xCC, 0x71));
@@ -201,61 +186,17 @@ namespace ByteGuard
                         };
                     }
 
-                    // Determina se il file presenta un'anomalia forense
-                    bool isAnomalous = false;
-                    string verdict = "Sano";
-                    
-                    if (result.IsSuccess)
+                    if (!result.IsSuccess)
                     {
-                        var profile = GetExpectedProfile(result.DeclaredExtension);
-                        double e = result.ShannonEntropy;
-                        
-                        if (profile == EntropyProfile.Testo && e > 6.5) 
-                        {
-                            isAnomalous = true;
-                            verdict = "Entropia troppo alta per un testo";
-                        }
-                        else if (profile == EntropyProfile.Testo && e < 1.0) 
-                        {
-                            isAnomalous = true;
-                            verdict = "Testo anomalo (ripetizioni o padding nullo)";
-                        }
-                        else if (profile == EntropyProfile.Eseguibile && e > 7.2) 
-                        {
-                            isAnomalous = true;
-                            verdict = "Possibile eseguibile packed/offuscato";
-                        }
-                        else if (profile == EntropyProfile.Eseguibile && e < 3.0) 
-                        {
-                            isAnomalous = true;
-                            verdict = "Eseguibile anomalo (entropia bassissima)";
-                        }
-                        else if (profile == EntropyProfile.Compresso && e < 6.0) 
-                        {
-                            isAnomalous = true;
-                            verdict = "Falso compresso (entropia bassissima)";
-                        }
-                        else if (profile == EntropyProfile.Compresso && e > 7.98) 
-                        {
-                            isAnomalous = true;
-                            verdict = "File fortemente cifrato (entropia estrema)";
-                        }
-                        
-                        // Il sanity check ha la precedenza assoluta
-                        if (!result.ExtensionMatch) 
-                        {
-                            isAnomalous = true;
-                            verdict = "File camuffato (Magic bytes errati)";
-                        }
+                        // Se l'errore è stato generato in C# (es. eccezione di sistema, JSON corrotto),
+                        // dobbiamo marcare manualmente il record fittizio come anomalo affinché venga 
+                        // posizionato in cima e colorato di rosso, dato che non è stato elaborato da Python.
+                        result = result with 
+                        { 
+                            IsAnomalous = true,
+                            Verdict = "Errore di analisi"
+                        };
                     }
-                    else
-                    {
-                        isAnomalous = true; // Un errore conta come anomalia da indagare
-                        verdict = "Errore di analisi";
-                    }
-                    
-                    result.IsAnomalous = isAnomalous;
-                    result.Verdict = verdict;
 
                     // AGGIORNAMENTO UI SINCRO:
                     // Poiché siamo in un thread worker del ThreadPool, non possiamo
@@ -263,7 +204,7 @@ namespace ByteGuard
                     // Dobbiamo re-indirizzare l'aggiunta al thread principale (Dispatcher).
                     await Application.Current.Dispatcher.InvokeAsync(() =>
                     {
-                        if (isAnomalous)
+                        if (result.IsAnomalous)
                         {
                             // Inserisce le anomalie in cima alla lista (indice 0)
                             ScannedFiles.Insert(0, result);
@@ -278,7 +219,7 @@ namespace ByteGuard
                         GlobalProgressBar.Value = completed;
                         TxtGlobalStatus.Text = $"Analisi in corso: {completed} / {total}";
                         
-                        if (isAnomalous)
+                        if (result.IsAnomalous)
                         {
                             anomalies++;
                             TxtAnomalyCount.Text = $"Anomalie: {anomalies}";
@@ -359,45 +300,19 @@ namespace ByteGuard
             TxtFilePath.Text = result.FilePath;
             TxtFileSize.Text = FormatFileSize(result.FileSizeBytes);
 
-            // Valutazione contestuale dell'entropia
-            var profile = GetExpectedProfile(result.DeclaredExtension);
             double e = result.ShannonEntropy;
-
             TxtEntropy.Text = string.Format("{0:F6} bit/simbolo", e);
             if (result.EntropySampled)
                 TxtEntropy.Text += "  (campionato)";
-                
-            bool anomaliaAlta = false;
-            bool anomaliaBassa = false;
 
-            switch (profile)
-            {
-                case EntropyProfile.Testo:
-                    anomaliaAlta = e > 6.5;
-                    break;
-                case EntropyProfile.Eseguibile:
-                    anomaliaAlta = e > 7.2;
-                    anomaliaBassa = e < 3.0;
-                    break;
-                case EntropyProfile.Compresso:
-                    anomaliaBassa = e < 6.0;
-                    break;
-            }
-
-            if (anomaliaAlta)
-            {
-                TxtEntropy.Foreground = BrushDanger;
-                TxtEntropy.Text      += "  [ANOMALIA: TROPPO ALTA]";
-            }
-            else if (anomaliaBassa)
+            if (result.IsAnomalous && (result.Verdict.Contains("ntropia") || result.Verdict.Contains("packed")))
             {
                 TxtEntropy.Foreground = BrushWarning;
-                TxtEntropy.Text      += "  [ANOMALIA: TROPPO BASSA]";
+                TxtEntropy.Text      += "  [ANOMALIA RILEVATA]";
             }
             else
             {
-                TxtEntropy.Foreground = BrushOk;
-                TxtEntropy.Text      += "  [NELLA NORMA]";
+                TxtEntropy.Foreground = BrushPrimary;
             }
 
             EntropyBarContainer.UpdateLayout();

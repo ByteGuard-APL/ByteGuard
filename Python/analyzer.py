@@ -31,11 +31,11 @@ MAGIC_NUMBERS: dict[str, bytes] = {
     ".jpeg": b"\xff\xd8\xff",
     ".zip":  b"PK\x03\x04",
     ".exe":  b"MZ",
-    ".dll":  b"MZ",          # PE format, come gli exe
-    ".sys":  b"MZ",          # PE format, driver di sistema
+    ".dll":  b"MZ",          
+    ".sys":  b"MZ",          
     ".elf":  b"\x7fELF",
-    ".docx": b"PK\x03\x04",  # docx e' un archivio zip rinominato
-    ".xlsx": b"PK\x03\x04",  # xlsx e' un archivio zip rinominato
+    ".docx": b"PK\x03\x04",  
+    ".xlsx": b"PK\x03\x04",  
     ".gz":   b"\x1f\x8b",
 }
 
@@ -72,6 +72,49 @@ def calculate_shannon_entropy(data: bytes) -> float:
         entropy -= p * math.log2(p)
 
     return entropy
+
+
+def get_expected_profile(extension: str) -> str:
+    """Restituisce il profilo di entropia atteso per una data estensione."""
+    ext = (extension or "").lower()
+    if ext in [".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".jpeg", ".png"]:
+        return "COMPRESSED"
+    if ext in [".exe", ".elf", ".dll", ".sys"]:
+        return "EXECUTABLE"
+    if ext in [".txt", ".json", ".xml", ".csv", ".html"]:
+        return "TEXT"
+    return "EXECUTABLE"  # default conservativo per tipi non noti
+
+def evaluate_forensic_verdict(entropy: float, extension_match: bool, extension: str) -> tuple[bool, str]:
+    """
+    Applica le regole euristiche per determinare se il file e' anomalo,
+    basandosi sull'entropia e sull'eventuale spoofing dell'estensione.
+    Restituisce (is_anomalous, verdict).
+    """
+    if not extension_match:
+        return True, "File camuffato (Magic bytes errati)"
+        
+    profile = get_expected_profile(extension)
+    
+    if profile == "TEXT":
+        if entropy > 6.5:
+            return True, "Entropia troppo alta per un testo"
+        if entropy < 1.0:
+            return True, "Testo anomalo (ripetizioni o padding nullo)"
+            
+    elif profile == "EXECUTABLE":
+        if entropy > 7.2:
+            return True, "Possibile eseguibile packed/offuscato"
+        if entropy < 3.0:
+            return True, "Eseguibile anomalo (entropia bassissima)"
+            
+    elif profile == "COMPRESSED":
+        if entropy < 6.0:
+            return True, "Falso compresso (entropia bassissima)"
+        if entropy > 7.98:
+            return True, "File fortemente cifrato (entropia estrema)"
+            
+    return False, "Sano"
 
 
 def read_sampled_content(f: io.BufferedReader, file_size: int) -> bytes:
@@ -170,6 +213,9 @@ def analyze_file(file_path: str) -> dict:
 
     entropy = calculate_shannon_entropy(content_for_entropy)
     magic_info = analyze_magic_numbers(header_bytes, extension)
+    
+    is_anomalous, verdict = evaluate_forensic_verdict(entropy, magic_info["extension_match"], extension)
+    
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return {
@@ -179,6 +225,8 @@ def analyze_file(file_path: str) -> dict:
         "shannon_entropy": round(entropy, 6),
         "entropy_sampled": entropy_sampled,  # True = valore approssimato (file > 100 MB)
         **magic_info,
+        "is_anomalous": is_anomalous,
+        "verdict": verdict,
         "analysis_status": "success",
         "error_message": None,
         "timestamp_utc": timestamp,
@@ -201,6 +249,8 @@ def build_error_payload(file_path: str, error: Exception) -> dict:
         "magic_number_hex": None,
         "magic_number_ascii": None,
         "extension_match": False,
+        "is_anomalous": True,
+        "verdict": "Errore di analisi",
         "analysis_status": "error",
         "error_message": f"{type(error).__name__}: {str(error)}",
         "timestamp_utc": timestamp,
