@@ -22,8 +22,15 @@ except AttributeError:
     pass  # stdout non e' una pipe (es. esecuzione in unit test): nessun problema
 
 
-# Mappa estensione -> magic bytes attesi all'inizio del file.
-# Se il file non inizia con questi byte, l'estensione e' probabilmente falsa.
+# Mappa estensione -> magic bytes attesi all'inizio del file binario.
+# Se il file binario non inizia con questi byte, l'estensione e' probabilmente falsa.
+#
+# NOTA FORENSE SUI FILE DI TESTO (.txt, .json, .csv, .html, .xml):
+# Questi formati sono intenzionalmente ESCLUSI da questo dizionario perche' non
+# possiedono magic bytes deterministici all'offset 0 (potrebbero iniziare con
+# spazi, BOM o andare a capo). Il motore li gestisce tramite "Spoofing Inverso":
+# verifica che il testo NON inizi con i magic bytes di formati binari noti,
+# intercettando cosi' eseguibili rinominati (es. malware.exe -> leggimi.txt).
 MAGIC_NUMBERS: dict[str, bytes] = {
     ".pdf":  b"%PDF-",
     ".png":  b"\x89PNG\r\n\x1a\n",
