@@ -19,25 +19,8 @@ namespace ByteGuard.Services
         [JsonPropertyName("file_path")]
         public string FilePath { get; init; } = string.Empty;
 
-        // Proprieta' computata per la DataGrid (mostra solo il nome del file, non l'intero percorso)
-        [JsonIgnore]
-        public string FileName => System.IO.Path.GetFileName(FilePath);
-
         [JsonPropertyName("file_size_bytes")]
         public long FileSizeBytes { get; init; }
-
-        // Proprieta' computata per la DataGrid (mostra la dimensione in formato leggibile)
-        [JsonIgnore]
-        public string DisplaySize
-        {
-            get
-            {
-                if (FileSizeBytes < 1024) return $"{FileSizeBytes} B";
-                if (FileSizeBytes < 1024 * 1024) return $"{FileSizeBytes / 1024.0:F1} KB";
-                if (FileSizeBytes < 1024L * 1024 * 1024) return $"{FileSizeBytes / (1024.0 * 1024):F2} MB";
-                return $"{FileSizeBytes / (1024.0 * 1024 * 1024):F2} GB";
-            }
-        }
 
         [JsonPropertyName("declared_extension")]
         public string? DeclaredExtension { get; init; }
@@ -70,15 +53,6 @@ namespace ByteGuard.Services
         [JsonPropertyName("timestamp_utc")]
         public string TimestampUtc { get; init; } = string.Empty;
 
-        // Proprieta' calcolata, non deserializzata. La soglia 7.0 NON e' qui:
-        // appartiene al layer UI (MainWindow.xaml.cs), non al DTO.
-        [JsonIgnore]
-        public bool IsSuccess => AnalysisStatus == "success";
-
-        // Proprieta' computata per la DataGrid (mostra l'esito base o l'errore)
-        [JsonIgnore]
-        public string DisplayStatus => IsSuccess ? "Completato" : "Errore";
-        
         // Flag calcolato dal motore Python per evidenziare visivamente la riga
         [JsonPropertyName("is_anomalous")]
         public bool IsAnomalous { get; init; }
@@ -86,6 +60,9 @@ namespace ByteGuard.Services
         // Testo esplicativo dell'anomalia determinato dal motore Python
         [JsonPropertyName("verdict")]
         public string Verdict { get; init; } = "Sano";
+
+        [JsonPropertyName("anomaly_code")]
+        public string AnomalyCode { get; init; } = "NONE";
     }
 
     public class PythonAnalyzerService
@@ -97,9 +74,7 @@ namespace ByteGuard.Services
         // lo istanziamo una sola volta nel costruttore e lo riusiamo ad ogni chiamata.
         private readonly JsonSerializerOptions _jsonOptions;
 
-        public PythonAnalyzerService(
-            string pythonExecutable = "python",
-            string? analyzerScriptPath = null)
+        public PythonAnalyzerService(string pythonExecutable = "python", string? analyzerScriptPath = null)
         {
             _pythonExecutable = pythonExecutable;
 
@@ -116,10 +91,8 @@ namespace ByteGuard.Services
             };
         }
 
-        /// <summary>
         /// Avvia analyzer.py come sottoprocesso e restituisce il risultato deserializzato.
         /// Lancia InvalidOperationException se Python non si avvia, JsonException se l'output non e' JSON valido.
-        /// </summary>
         public async Task<AnalysisResult> AnalyzeFileAsync(string filePath)
         {
             var startInfo = new ProcessStartInfo

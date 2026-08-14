@@ -9,7 +9,9 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
+using System.Diagnostics;
 using Microsoft.Win32;
 using ByteGuard.Services;
 
@@ -136,9 +138,11 @@ namespace ByteGuard
                                                   .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)));
                         files.AddRange(validFiles);
                     }
-                    catch (UnauthorizedAccessException) 
-                    { 
-                        // Ignora le cartelle di sistema inaccessibili
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        // Silenziamo l'errore per cartelle di sistema a cui non abbiamo accesso.
+                        // Aggiungiamo un log diagnostico per non perdere traccia del problema a livello di debug.
+                        Debug.WriteLine($"[ByteGuard] Accesso negato alla cartella: {path} - Dettaglio: {ex.Message}");
                     }
                 }
             }
@@ -148,7 +152,6 @@ namespace ByteGuard
         // ======================================================================
         // ANALISI BATCH PARALLELA
         // ======================================================================
-
         private async Task RunBatchAnalysisAsync(List<string> filePaths)
         {
             SetUiAnalyzing(filePaths.Count);
@@ -157,75 +160,66 @@ namespace ByteGuard
             int completed = 0;
             int anomalies = 0;
             
-            // Limitiamo la concorrenza per evitare di sovraccaricare la RAM e il disco (I/O)
-            // avviando troppi interpreti Python contemporaneamente. 
-            // Usiamo la metà dei core disponibili, con un tetto massimo di 4 processi simultanei,
-            // garantendo fluidità e stabilità anche su macchine più lente o con hard disk meccanici.
-            int safeConcurrency = Math.Max(1, Math.Min(4, Environment.ProcessorCount / 2));
-            var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = safeConcurrency };
+            int chunkSize = Math.Max(1, Environment.ProcessorCount / 2);
 
             try
             {
-                // Esecuzione asincrona massiva sul ThreadPool (Background)
-                await Parallel.ForEachAsync(filePaths, parallelOptions, async (filePath, ct) =>
+                foreach (var chunk in filePaths.Chunk(chunkSize))
                 {
-                    AnalysisResult result;
-                    try
+                    var tasks = chunk.Select(async filePath =>
                     {
-                        result = await _analyzerService.AnalyzeFileAsync(filePath);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Fallback manuale: se un file crasha (es. lock, corruzione)
-                        // costruiamo un result fittizio per mostrarlo rosso nella griglia
-                        result = new AnalysisResult 
-                        { 
-                            FilePath = filePath, 
-                            AnalysisStatus = "error", 
-                            ErrorMessage = ex.Message 
-                        };
-                    }
+                        AnalysisResult result;
+                        try
+                        {
+                            result = await _analyzerService.AnalyzeFileAsync(filePath);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Fallback manuale: se un file crasha (es. lock, corruzione)
+                            result = new AnalysisResult 
+                            { 
+                                FilePath = filePath, 
+                                AnalysisStatus = "error", 
+                                ErrorMessage = ex.Message 
+                            };
+                        }
 
-                    if (!result.IsSuccess)
-                    {
-                        // Se l'errore è stato generato in C# (es. eccezione di sistema, JSON corrotto),
-                        // dobbiamo marcare manualmente il record fittizio come anomalo affinché venga 
-                        // posizionato in cima e colorato di rosso, dato che non è stato elaborato da Python.
-                        result = result with 
-                        { 
-                            IsAnomalous = true,
-                            Verdict = "Errore di analisi"
-                        };
-                    }
+                        if (result.AnalysisStatus != "success")
+                        {
+                            // Se l'errore è stato generato in C#, lo marchiamo manualmente come anomalo
+                            result = result with 
+                            { 
+                                IsAnomalous = true,
+                                Verdict = "Errore di analisi",
+                                AnomalyCode = "ANALYSIS_ERROR"
+                            };
+                        }
+                        return result;
+                    });
 
-                    // AGGIORNAMENTO UI SINCRO:
-                    // Poiché siamo in un thread worker del ThreadPool, non possiamo
-                    // toccare `ScannedFiles` direttamente (causerebbe un crash WPF).
-                    // Dobbiamo re-indirizzare l'aggiunta al thread principale (Dispatcher).
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    // Attendiamo il completamento parallelo dell'intero pacchetto.
+                    // Al termine, riprendiamo automaticamente l'esecuzione sul thread della UI.
+                    var results = await Task.WhenAll(tasks);
+
+                    // Aggiornamento UI a Blocchi (niente Dispatcher necessario)
+                    foreach (var result in results)
                     {
                         if (result.IsAnomalous)
                         {
-                            // Inserisce le anomalie in cima alla lista (indice 0)
                             ScannedFiles.Insert(0, result);
+                            anomalies++;
+                            TxtAnomalyCount.Text = $"Anomalie: {anomalies}";
                         }
                         else
                         {
-                            // Accoda i file normali in fondo
                             ScannedFiles.Add(result);
                         }
                         
                         completed++;
                         GlobalProgressBar.Value = completed;
                         TxtGlobalStatus.Text = $"Analisi in corso: {completed} / {total}";
-                        
-                        if (result.IsAnomalous)
-                        {
-                            anomalies++;
-                            TxtAnomalyCount.Text = $"Anomalie: {anomalies}";
-                        }
-                    });
-                });
+                    }
+                }
             }
             finally
             {
@@ -275,7 +269,7 @@ namespace ByteGuard
 
         private void DisplayResults(AnalysisResult result)
         {
-            if (result.IsSuccess)
+            if (result.AnalysisStatus == "success")
             {
                 TxtStatus.Text       = "Analisi completata con successo";
                 TxtStatus.Foreground = BrushOk;
@@ -305,7 +299,7 @@ namespace ByteGuard
             if (result.EntropySampled)
                 TxtEntropy.Text += "  (campionato)";
 
-            if (result.IsAnomalous && (result.Verdict.Contains("ntropia") || result.Verdict.Contains("packed")))
+            if (result.IsAnomalous && (result.AnomalyCode == "HIGH_ENTROPY" || result.AnomalyCode == "LOW_ENTROPY" || result.AnomalyCode == "EXTREME_ENTROPY"))
             {
                 TxtEntropy.Foreground = BrushWarning;
                 TxtEntropy.Text      += "  [ANOMALIA RILEVATA]";
@@ -365,5 +359,52 @@ namespace ByteGuard
             if (bytes < 1024L * 1024 * 1024) return string.Format("{0:F2} MB", bytes / (1024.0 * 1024));
             return string.Format("{0:F2} GB", bytes / (1024.0 * 1024 * 1024));
         }
+    }
+
+    //Converters per la UI
+
+    public class FileSizeConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        {
+            if (value is long bytes)
+            {
+                if (bytes < 1024) return $"{bytes} B";
+                if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+                if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F2} MB";
+                return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+            }
+            return value;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
+    }
+
+    public class FileNameConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        {
+            if (value is string path && !string.IsNullOrWhiteSpace(path))
+            {
+                return System.IO.Path.GetFileName(path);
+            }
+            return value;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
+    }
+
+    public class StatusConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        {
+            if (value is string status)
+            {
+                return status == "success" ? "Completato" : "Errore";
+            }
+            return value;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
     }
 }
