@@ -7,6 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+    <!-- CS4014: fire-and-forget intentionale per StartWatchdogAsync (watchdog a vita indefinita) -->
+    <NoWarn>$(NoWarn);CS4014</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

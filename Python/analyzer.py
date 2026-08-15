@@ -11,6 +11,8 @@ import io
 import json
 import math
 import datetime
+import logging
+import warnings
 
 
 # Su Windows la console usa cp1252 di default, che non copre tutti i caratteri Unicode.
@@ -20,6 +22,25 @@ try:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 except AttributeError:
     pass  # stdout non e' una pipe (es. esecuzione in unit test): nessun problema
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gestione Warning — Defense in Depth
+# ─────────────────────────────────────────────────────────────────────────────
+# stdout e' il canale IPC strutturato (JSON) verso Go/C#: deve contenere SOLO JSON.
+# stderr e' il canale diagnostico: Python vi scrive i DeprecationWarning, ecc.
+# Il modulo Go usa CombinedOutput() che mescola i due stream: se un warning
+# finisse su stderr, Go invierebbe JSON malformato a C#.
+#
+# Soluzione: reindirizziamo i warning verso un file di log dedicato.
+# Cosi' non vengono persi (sono consultabili) ma non inquinano lo stdout.
+log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byteguard_warnings.log")
+logging.basicConfig(
+    filename=log_path,
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logging.captureWarnings(True)  # Intercetta tutti i warning di Python e li invia al logger
 
 
 # Mappa estensione -> magic bytes attesi all'inizio del file binario.

@@ -1,0 +1,206 @@
+<Page x:Class="ByteGuard.Pages.CryptoPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="CryptoPage" Background="#1A1A2E" FontFamily="Segoe UI">
+
+    <Page.Resources>
+        <!-- Stile per le righe della DataGrid con hover visibile -->
+        <Style TargetType="DataGridRow">
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#2A2A4A"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0F3460"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Stile per il bottone "Rimuovi" inline nella griglia -->
+        <Style x:Key="RemoveButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#E74C3C"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="6,2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#3A1A1A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Stile per i bottoni primari della CryptoPage -->
+        <Style x:Key="CryptoPrimaryStyle" TargetType="Button">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Padding" Value="15,12"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.85"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.7"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Stile per il bottone sfoglia -->
+        <Style x:Key="BrowseButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#00D4FF"/>
+            <Setter Property="Foreground" Value="#1A1A2E"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="15,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#33E8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- HEADER -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,20">
+            <TextBlock Text="&#x1F512; Cassaforte Criptata" Foreground="#00D4FF" FontSize="20" FontWeight="Bold"/>
+            <TextBlock Text="Trascina i file per cifrarli (.lock) o decifrarli in modo sicuro tramite il modulo C++." Foreground="#8892A4" FontSize="13" Margin="0,5,0,0"/>
+        </StackPanel>
+
+        <!-- MAIN AREA -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="180"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Colonna sinistra: Drop Zone + Coda File -->
+            <Grid Grid.Column="0" Margin="0,0,15,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Drop Zone -->
+                <Border Grid.Row="0" Margin="0,0,0,12" Background="#0D1B2A" CornerRadius="8"
+                        BorderThickness="2" BorderBrush="#0F3460"
+                        AllowDrop="True" Drop="DropZone_Drop" DragOver="DropZone_DragOver" DragLeave="DropZone_DragLeave"
+                        x:Name="DropZoneBorder">
+                    <StackPanel Margin="20" Orientation="Vertical">
+                        <TextBlock x:Name="TxtDropPrompt"
+                                   Text="Trascina i file qui per aggiungerli alla coda"
+                                   Foreground="#E8EAF0" FontWeight="SemiBold"
+                                   HorizontalAlignment="Center" IsHitTestVisible="False"/>
+                        <Button x:Name="BtnBrowseFile" Content="Sfoglia File..."
+                                Style="{StaticResource BrowseButtonStyle}"
+                                Margin="0,10,0,0" HorizontalAlignment="Center"
+                                Click="BtnBrowseFile_Click"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- DataGrid coda file -->
+                <DataGrid Grid.Row="1" x:Name="FilesDataGrid"
+                          AutoGenerateColumns="False" IsReadOnly="False"
+                          HeadersVisibility="Column" SelectionMode="Single"
+                          Background="#16213E" RowBackground="#16213E" AlternatingRowBackground="#1A1A2E"
+                          Foreground="#E8EAF0" GridLinesVisibility="None" BorderThickness="0"
+                          CanUserAddRows="False">
+                    <DataGrid.Resources>
+                        <Style TargetType="DataGridColumnHeader">
+                            <Setter Property="Background" Value="#0F3460"/>
+                            <Setter Property="Foreground" Value="#E8EAF0"/>
+                            <Setter Property="Padding" Value="10,8"/>
+                            <Setter Property="FontWeight" Value="SemiBold"/>
+                        </Style>
+                    </DataGrid.Resources>
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Nome File" Binding="{Binding Name}" Width="*" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Stato" Binding="{Binding Status}" Width="130" IsReadOnly="True"/>
+                        <!-- Colonna con bottone Rimuovi, fuori dallo stile IsReadOnly per ricevere i click -->
+                        <DataGridTemplateColumn Header="" Width="55">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Button Content="✕" Style="{StaticResource RemoveButtonStyle}"
+                                            Tag="{Binding}"
+                                            Click="BtnRemoveFile_Click"
+                                            ToolTip="Rimuovi dalla coda"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+
+            <!-- Colonna destra: Azioni -->
+            <Border Grid.Column="1" Background="#16213E" CornerRadius="12" Padding="20">
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="OPERAZIONI" Foreground="#8892A4" FontSize="11"
+                               FontWeight="Bold" Margin="0,0,0,15" HorizontalAlignment="Center"/>
+                    <Button x:Name="BtnEncrypt" Content="&#x1F512; CIFRA"
+                            Background="#E74C3C" Style="{StaticResource CryptoPrimaryStyle}"
+                            Margin="0,0,0,12" Click="BtnEncrypt_Click"/>
+                    <Button x:Name="BtnDecrypt" Content="&#x1F513; DECIFRA"
+                            Background="#2ECC71" Style="{StaticResource CryptoPrimaryStyle}"
+                            Click="BtnDecrypt_Click"/>
+
+                    <Separator Margin="0,20" Background="#2A2A4A"/>
+
+                    <!-- Conta file in coda -->
+                    <TextBlock Text="FILE IN CODA" Foreground="#8892A4" FontSize="10"
+                               FontWeight="Bold" HorizontalAlignment="Center"/>
+                    <TextBlock x:Name="TxtQueueCount" Text="0" Foreground="#00D4FF"
+                               FontSize="28" FontWeight="Bold" HorizontalAlignment="Center"/>
+
+                    <Separator Margin="0,20" Background="#2A2A4A"/>
+
+                    <!-- Svuota coda -->
+                    <Button Content="&#x1F5D1; Svuota Coda" Background="#2A2A4A"
+                            Style="{StaticResource CryptoPrimaryStyle}"
+                            FontSize="12" Padding="10,8"
+                            Click="BtnClearQueue_Click"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Page>
