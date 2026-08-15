@@ -1,62 +1,36 @@
-# ByteGuard
+# ByteGuard - Progetto APL
 
-ByteGuard è un'applicazione desktop scritta in C# (WPF) per l'analisi forense e la crittografia dei file. Sfrutta moduli esterni scritti in Go e Python per gestire carichi di lavoro intensivi e operazioni specifiche sul file system.
+ByteGuard e' un'applicazione desktop scritta in C# (WPF) per l'analisi forense e la crittografia dei file. Utilizza un modulo in Go per fare da Watchdog sulle cartelle e un modulo in Python per analizzare l'entropia e i magic bytes dei file.
 
-## 📋 Requisiti di Sistema
+## Requisiti di Sistema
+- .NET 10.0 SDK (per C#)
+- Go 1.21 o superiore
+- Python 3.10 o superiore
 
-Per compilare ed eseguire il progetto partendo dal codice sorgente, sono necessari:
-- **.NET 10.0 SDK** (per l'interfaccia grafica C# WPF)
-- **Go 1.21+** (per il modulo Watchdog)
-- **Python 3.10+** (per il motore di analisi dell'entropia)
+## Guida all'avvio
 
----
+Per testare l'applicativo partendo dal codice sorgente, segui questi due passaggi:
 
-## 🚀 Guida all'Avvio (Per i Docenti)
+1. Compilare il modulo Go
+- Apri un terminale nella cartella `watchdog-go`
+- Lancia il comando: `go build -o watchdog.exe .`
+- Questo generera' l'eseguibile del Watchdog di cui C# ha bisogno.
 
-Segui questi passaggi in ordine per testare l'applicativo per la prima volta:
+2. Avviare l'interfaccia C#
+- Apri un terminale nella cartella `CSharp`
+- Lancia il comando: `dotnet run`
+- In alternativa, apri il file `ByteGuard.csproj` con Visual Studio e premi F5.
 
-### 1. Compila il modulo Go (Watchdog)
-Il sistema di monitoraggio cartelle richiede la pre-compilazione dell'eseguibile Go.
-1. Apri un terminale nella cartella `watchdog-go`
-2. Esegui il comando:
-   ```cmd
-   go build -o watchdog.exe .
-   ```
-3. Verifica che il file `watchdog.exe` sia stato creato con successo in quella cartella.
+## Struttura del progetto e file principali
 
-### 2. Compila e avvia l'interfaccia C#
-1. Apri un terminale nella cartella `CSharp`
-2. Esegui il comando:
-   ```cmd
-   dotnet run
-   ```
-   *(In alternativa, puoi aprire `CSharp/ByteGuard.csproj` con Visual Studio e premere F5).*
+- Eseguibile compilato:
+  Se compili il progetto, l'eseguibile finale da avviare si trovera' in `CSharp/bin/Debug/net10.0-windows/ByteGuard.exe`.
+  NOTA: lo script `analyzer.py` viene copiato in automatico in questa cartella durante la build.
 
----
+- File di log:
+  Se il modulo Python lancia dei warning durante l'analisi, questi vengono intercettati e salvati in un file di log per non corrompere la comunicazione con Go. Il file verra' creato in `Python/byteguard_warnings.log`.
 
-## 📁 Struttura e File Importanti
-
-### Dove si trova l'eseguibile finale?
-Se il progetto è stato compilato correttamente, l'eseguibile principale dell'interfaccia (il file `.exe` da cui si avvia l'app in produzione) si trova in:
-👉 `CSharp/bin/Debug/net10.0-windows/ByteGuard.exe`
-
-*(Nota: il file `analyzer.py` viene copiato automaticamente dal sistema di build di C# nella stessa cartella dell'eseguibile).*
-
-### Dove trovo i file di Test?
-Abbiamo predisposto una cartella con file campione (sani e anomali) per testare l'analisi dell'entropia e la verifica dei Magic Bytes.
-👉 I file si trovano nella cartella: `TestFiles` (nella root del progetto).
-- Puoi trascinarli nella "Drop Zone" dell'app per l'analisi singola.
-- Puoi selezionare l'intera cartella `TestFiles` usando la funzione "Monitora Cartella" per testare il Watchdog in Go.
-
-### Dove trovo i Log (Errori e Warning)?
-Se il modulo Python rileva delle anomalie interne o lancia dei *Warning*, questi vengono silenziosamente intercettati (per non corrompere la comunicazione IPC JSON con Go) e salvati in un file di testo.
-👉 Il file di log si trova in: `Python/byteguard_warnings.log`
-*(Viene generato automaticamente al primo warning).*
-
----
-
-## 🧩 Architettura Moduli
-
-- **UI (C# WPF):** Gestisce l'interazione utente e l'orchestrazione dei processi. Usa il pattern *Event Sourcing* (tramite `System.Text.Json`) per leggere l'output dei processi figli in tempo reale.
-- **Motore di Analisi (Python):** Script standalone (`analyzer.py`) che calcola l'entropia di Shannon e confronta i Magic Bytes per smascherare file con estensioni falsificate.
-- **Watchdog (Go):** Sottoprocesso (`watchdog.exe`) che sfrutta un *Worker Pool* e le *Goroutines* per monitorare le cartelle e gestire code di file in maniera concorrente, invocando Python e comunicando con C# via JSON over stdout.
+- Moduli:
+  - `CSharp/`: Contiene la UI e la logica di gestione (gestita tramite navigazione SPA).
+  - `Python/`: Contiene `analyzer.py`, lo script standalone che fa i calcoli sull'entropia.
+  - `watchdog-go/`: Contiene il codice Go per il monitoraggio concorrente delle cartelle.
