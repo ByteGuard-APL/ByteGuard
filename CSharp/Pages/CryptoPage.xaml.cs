@@ -1,6 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -9,6 +13,8 @@ using ByteGuard.Dialogs;
 
 namespace ByteGuard.Pages
 {
+    // Approccio didattico: classe semplice. L'aggiornamento della griglia 
+    // viene forzato manualmente da codice tramite FilesDataGrid.Items.Refresh()
     public class CryptoFileItem
     {
         public string FilePath { get; set; } = string.Empty;
@@ -73,11 +79,37 @@ namespace ByteGuard.Pages
 
         private void AddFilesToQueue(string[] paths)
         {
+            // Iteratori Personalizzati (Yield Return): 
+            // Consuma l'iteratore in modo "pigro" (lazy), aggiungendo file man mano che 
+            // vengono scoperti anche all'interno di sottocartelle espanse ricorsivamente.
+            foreach (var file in GetFilesDaPercorso(paths))
+            {
+                if (!CryptoQueue.Any(x => x.FilePath == file))
+                    CryptoQueue.Add(new CryptoFileItem { FilePath = file });
+            }
+        }
+
+        // Iteratori Personalizzati (Yield Return)
+        // Questo metodo genera una sequenza di stringhe. Invece di allocare in memoria
+        // una lista gigantesca con tutti i percorsi dei file (es. 10.000 file), 'yield return'
+        // restituisce un file alla volta e sospende l'esecuzione, ottimizzando la memoria (O(1)).
+        private IEnumerable<string> GetFilesDaPercorso(string[] paths)
+        {
             foreach (var path in paths)
             {
-                // Aggiunge solo file (non cartelle) e filtra i duplicati
-                if (File.Exists(path) && !CryptoQueue.Any(x => x.FilePath == path))
-                    CryptoQueue.Add(new CryptoFileItem { FilePath = path });
+                if (File.Exists(path))
+                {
+                    yield return path; // Restituisce un singolo file
+                }
+                else if (Directory.Exists(path))
+                {
+                    // Esplora la directory ricorsivamente e restituisce i file man mano che li trova.
+                    // EnumerateFiles è già pigro (a differenza di GetFiles), e noi lo combiniamo col nostro yield.
+                    foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    {
+                        yield return file;
+                    }
+                }
             }
         }
 
@@ -106,13 +138,11 @@ namespace ByteGuard.Pages
 
         // ======================================================================
         // OPERAZIONI CRITTOGRAFICHE
-        // I file vengono elaborati UNO ALLA VOLTA tramite il modulo C++.
-        // Ogni file e' un'operazione XOR indipendente: in caso di errore su uno
-        // specifico file, gli altri non vengono bloccati.
-        // Il file cifrato viene creato come NUOVO file con estensione .lock,
-        // lasciando l'originale intatto.
         // ======================================================================
-        private void BtnEncrypt_Click(object sender, RoutedEventArgs e)
+        
+        // Programmazione Asincrona (Task & Await)
+        // Usiamo async void poiché si tratta di un gestore di eventi UI top-level.
+        private async void BtnEncrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
             {
@@ -125,19 +155,50 @@ namespace ByteGuard.Pages
             {
                 string key = dialog.Password;
 
-                // Iteriamo file per file (approccio one-by-one)
+                // Disabilitiamo temporaneamente i bottoni o l'interazione se necessario (omesso per brevità)
+                // Iteriamo file per file (approccio sequenziale asincrono)
                 foreach (var item in CryptoQueue)
                 {
-                    // TODO: Chiamare il servizio C++ per questo singolo file:
-                    // CppService.Encrypt(item.FilePath, key);
-                    // Il C++ creera' item.FilePath + ".lock" lasciando l'originale intatto.
-                    item.Status = "Cifrato (.lock)";
+                    item.Status = "Cifratura in corso..."; 
+                    FilesDataGrid.Items.Refresh();
+
+                    // Spostiamo il carico computazionale (crittografia C++) su un thread in background.
+                    // In questo modo, l'interfaccia (Main Thread) resta responsiva e non si congela.
+                    await Task.Run(() => 
+                    {
+                        // Gestione Eccezioni (Try-Catch Isolato)
+                        // Isoliamo l'operazione. Se un file fallisce, l'eccezione viene catturata qui,
+                        // evitando il blocco totale del ciclo foreach sugli altri file.
+                        try
+                        {
+                            // TODO: Chiamare il servizio C++ per questo singolo file:
+                            // CppService.Encrypt(item.FilePath, key);
+                            // Simuliamo il lavoro del modulo C++:
+                            System.Threading.Thread.Sleep(500); 
+
+                            // Aggiorniamo la UI usando il Dispatcher poiché Task.Run è su un thread di background.
+                            Dispatcher.Invoke(() => 
+                            {
+                                item.Status = "Cifrato (.lock)";
+                                FilesDataGrid.Items.Refresh();
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            // Segnaliamo l'errore sul singolo file e permettiamo al ciclo di continuare.
+                            Dispatcher.Invoke(() => 
+                            {
+                                item.Status = $"Errore: {ex.Message}";
+                                FilesDataGrid.Items.Refresh();
+                            });
+                        }
+                    });
                 }
-                FilesDataGrid.Items.Refresh();
             }
         }
 
-        private void BtnDecrypt_Click(object sender, RoutedEventArgs e)
+        // Programmazione Asincrona (Task & Await)
+        private async void BtnDecrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
             {
@@ -152,13 +213,36 @@ namespace ByteGuard.Pages
 
                 foreach (var item in CryptoQueue)
                 {
-                    // TODO: Chiamare il servizio C++ per questo singolo file:
-                    // Il C++ verifichera' il checksum FNV-1a prima di decifrare.
-                    // Se la chiave e' errata o il file e' stato manomesso, lancera' un'eccezione.
-                    // CppService.Decrypt(item.FilePath, key);
-                    item.Status = "Decifrato";
+                    item.Status = "Decifratura in corso...";
+                    FilesDataGrid.Items.Refresh(); // Aggiornamento manuale
+
+                    await Task.Run(() => 
+                    {
+                        // Gestione Eccezioni (Try-Catch Isolato)
+                        try
+                        {
+                            // TODO: Chiamare il servizio C++ per questo singolo file:
+                            // CppService.Decrypt(item.FilePath, key);
+                            // Il C++ verificherà il checksum FNV-1a prima di decifrare e lancerà un'eccezione
+                            // se la chiave è errata o il file è stato alterato.
+                            System.Threading.Thread.Sleep(500); // Simulazione
+                            
+                            Dispatcher.Invoke(() => 
+                            {
+                                item.Status = "Decifrato";
+                                FilesDataGrid.Items.Refresh();
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Dispatcher.Invoke(() => 
+                            {
+                                item.Status = $"Errore: {ex.Message}";
+                                FilesDataGrid.Items.Refresh();
+                            });
+                        }
+                    });
                 }
-                FilesDataGrid.Items.Refresh();
             }
         }
     }
