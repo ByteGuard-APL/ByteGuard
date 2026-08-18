@@ -29,8 +29,7 @@ namespace ByteGuard.Pages
         // la DataGrid ogni volta che viene aggiunto un nuovo elemento.
         public ObservableCollection<AnalysisResult> ScannedFiles { get; } = new ObservableCollection<AnalysisResult>();
 
-        // Elenco delle estensioni ufficialmente supportate e gestite dal motore.
-        // File con estensioni diverse verranno scartati a monte per evitare falsi positivi.
+        // Lista delle estensioni che supportiamo. Quello che non è qui dentro viene scartato per evitare falsi positivi.
         private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".jpeg", ".png",
@@ -106,8 +105,7 @@ namespace ByteGuard.Pages
             var dialog = new OpenFolderDialog
             {
                 Title = "Seleziona cartella da monitorare",
-                // Il Watchdog Go accetta UNA sola cartella come argomento (os.Args[1]).
-                // Multiselect = false riflette questo vincolo architetturale del modulo Go.
+                // Blocco la multiselezione perché il Watchdog in Go prende solo una cartella alla volta da argv.
                 Multiselect = false
             };
 
@@ -122,30 +120,23 @@ namespace ByteGuard.Pages
                 GlobalProgressBar.IsIndeterminate = true; // Rotellina: non sappiamo quanti file arriveranno
                 BtnStopWatchdog.Visibility = Visibility.Visible;
 
-                // Non usiamo 'await' qui perche' il watchdog gira all'infinito.
-                // Se lo facessimo, l'interfaccia si bloccherebbe.
-                // Salviamo il processo in _watchdogProcess cosi' possiamo chiuderlo dopo dal bottone Stop.
-#pragma warning disable CS4014 // Ignoriamo l'avviso del compilatore perche' e' voluto
+                // Faccio il discard (_) e non uso await, altrimenti la UI si blocca visto che il Watchdog gira all'infinito.
+                // Disabilito il warning CS4014 apposta.
+#pragma warning disable CS4014
                 _ = StartWatchdogAsync(dialog.FolderName);
 #pragma warning restore CS4014
             }
         }
 
-        /// <summary>
-        /// Avvia watchdog.exe come sottoprocesso, redirige il suo stdout e legge
-        /// gli eventi JSON riga per riga in modo asincrono.
-        /// </summary>
+        // Avvio l'eseguibile Go in background e leggo cosa stampa riga per riga.
         private async Task StartWatchdogAsync(string folder)
         {
-            // Calcoliamo il percorso dell'eseguibile Go.
-            // Dato che siamo dentro bin/Debug/net10.0-windows, dobbiamo risalire di 4 cartelle
-            // per arrivare alla root del progetto e trovare la cartella watchdog-go.
+            // Risalgo un po' di cartelle per trovare l'eseguibile Go compilato.
             string watchdogDir = Path.GetFullPath(
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "watchdog-go"));
             string watchdogExe = Path.Combine(watchdogDir, "watchdog.exe");
 
-            // Guardia: se l'eseguibile non e' stato compilato (go build non e' stato eseguito),
-            // informiamo l'utente invece di andare in crash silenzioso.
+            // Se mi scordo di fare 'go build', avviso invece di far finta di nulla.
             if (!File.Exists(watchdogExe))
             {
                 MessageBox.Show(
@@ -156,34 +147,32 @@ namespace ByteGuard.Pages
                 return;
             }
 
-            // Impostiamo l'avvio del processo senza finestre visibili e redirigendo l'output
+            // Avvio il processo di nascosto e catturo l'output
             var startInfo = new ProcessStartInfo
             {
                 FileName               = watchdogExe,
-                RedirectStandardOutput = true, // Cosi' possiamo leggere cosa stampa Go
-                UseShellExecute        = false, // Serve per far funzionare il redirect
+                RedirectStandardOutput = true, 
+                UseShellExecute        = false, 
                 CreateNoWindow         = true,
                 
-                // Impostiamo la working directory su watchdog-go/ perche' il codice Go
-                // usa un percorso relativo ("../Python/analyzer.py") che altrimenti si spaccherebbe
+                // Metto la working directory giusta altrimenti Go non trova lo script Python
                 WorkingDirectory       = watchdogDir,
                 
-                // Usiamo UTF-8 per evitare problemi con cartelle/file che contengono accenti
+                // Forzo UTF-8 sennò i percorsi con gli accenti si spaccano
                 StandardOutputEncoding = System.Text.Encoding.UTF8,
             };
 
-            // Passiamo la cartella come primo argomento: diventa os.Args[1] nel main() di Go.
+            // Passo la cartella come argomento
             startInfo.ArgumentList.Add(folder);
 
-            // Salviamo il riferimento al processo nel campo membro: serve a BtnStopWatchdog_Click
-            // per poter chiamare _watchdogProcess.Kill() in un secondo momento.
+            // Salvo il processo così posso killarlo dopo col bottone Stop
             _watchdogProcess = new Process { StartInfo = startInfo };
 
             try
             {
                 _watchdogProcess.Start();
 
-                // Leggiamo quello che Go stampa (che e' sempre JSON) riga per riga
+                // Leggo quello che Go stampa (che è sempre JSON) riga per riga
                 using var reader = _watchdogProcess.StandardOutput;
                 string? line;
                 while ((line = await reader.ReadLineAsync()) != null)
@@ -196,24 +185,20 @@ namespace ByteGuard.Pages
                     }
                     catch (JsonException)
                     {
-                        // Nel caso in cui Go dovesse stampare un errore strano (es. panic crash),
-                        // lo ignoriamo per non far crashare anche l'app C#
+                        // Se Go va in crash o stampa roba strana (panic), lo ignoro per non far crashare il C#
                         Debug.WriteLine($"[ByteGuard] Riga non-JSON ignorata da Go: {line}");
                     }
                 }
 
-                // Quando Go termina (per SIGTERM o kill), aspettiamo che il processo
-                // si chiuda completamente prima di continuare (cleanup delle risorse OS).
+                // Aspetto che si chiuda per bene per pulire le risorse.
                 await _watchdogProcess.WaitForExitAsync();
             }
             catch (Exception ex)
             {
-                // Gestisce il caso in cui watchdog.exe non riesca proprio ad avviarsi
-                // (es. permessi mancanti, file corrotto).
+                // Se proprio non parte lo scrivo nel log
                 Debug.WriteLine($"[ByteGuard] Errore avvio watchdog: {ex.Message}");
 
-                // Dispatcher.InvokeAsync e' necessario perche' siamo su un thread di background:
-                // le proprieta' dei controlli WPF possono essere toccate SOLO dal thread UI.
+                // Dato che sono in background, uso il Dispatcher per toccare la UI
                 Dispatcher.InvokeAsync(() =>
                 {
                     SetUiReady();
@@ -222,11 +207,7 @@ namespace ByteGuard.Pages
             }
         }
 
-        /// <summary>
-        /// Legge l'evento JSON da Go e aggiorna l'interfaccia di conseguenza.
-        /// Usiamo JsonDocument invece di creare mille classi DTO per semplificare il codice.
-        /// Ricorda: tutto cio' che tocca la UI deve usare Dispatcher.InvokeAsync.
-        /// </summary>
+        // Legge il JSON da Go usando JsonDocument così non devo creare mille classi DTO.
         private void DispatchGoEvent(string jsonLine)
         {
             using JsonDocument doc = JsonDocument.Parse(jsonLine);
@@ -250,8 +231,7 @@ namespace ByteGuard.Pages
                     break;
 
                 case "analysis_completed":
-                    // Estraiamo la parte "result" del JSON e la trasformiamo direttamente
-                    // nella nostra classe AnalysisResult (la stessa che usiamo per Python)
+                    // Converto il risultato direttamente nella mia classe AnalysisResult
                     var resultElement = root.GetProperty("result");
                     
                     var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
@@ -331,7 +311,7 @@ namespace ByteGuard.Pages
             });
         }
 
-        // Metodo ricorsivo per estrarre tutti i file validi da una lista mista di file e cartelle
+        // Estraggo i file dalle cartelle scartando le estensioni che non ci interessano
         private List<string> ResolveFiles(IEnumerable<string> paths)
         {
             var files = new List<string>();

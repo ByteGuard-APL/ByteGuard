@@ -13,8 +13,7 @@ using ByteGuard.Dialogs;
 
 namespace ByteGuard.Pages
 {
-    // Approccio didattico: classe semplice. L'aggiornamento della griglia 
-    // viene forzato manualmente da codice tramite FilesDataGrid.Items.Refresh()
+
     public class CryptoFileItem
     {
         public string FilePath { get; set; } = string.Empty;
@@ -79,9 +78,8 @@ namespace ByteGuard.Pages
 
         private void AddFilesToQueue(string[] paths)
         {
-            // Iteratori Personalizzati (Yield Return): 
-            // Consuma l'iteratore in modo "pigro" (lazy), aggiungendo file man mano che 
-            // vengono scoperti anche all'interno di sottocartelle espanse ricorsivamente.
+            // Uso un iteratore per consumare i file man mano che li trovo,
+            // esplorando anche le sottocartelle in modo ricorsivo.
             foreach (var file in GetFilesDaPercorso(paths))
             {
                 if (!CryptoQueue.Any(x => x.FilePath == file))
@@ -89,10 +87,8 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Iteratori Personalizzati (Yield Return)
-        // Questo metodo genera una sequenza di stringhe. Invece di allocare in memoria
-        // una lista gigantesca con tutti i percorsi dei file (es. 10.000 file), 'yield return'
-        // restituisce un file alla volta e sospende l'esecuzione, ottimizzando la memoria (O(1)).
+        // Uso yield return per scorrere i file uno ad uno senza allocare array giganti in RAM.
+        // E' molto utile se l'utente seleziona una cartella con migliaia di file.
         private IEnumerable<string> GetFilesDaPercorso(string[] paths)
         {
             foreach (var path in paths)
@@ -140,8 +136,7 @@ namespace ByteGuard.Pages
         // OPERAZIONI CRITTOGRAFICHE
         // ======================================================================
         
-        // Programmazione Asincrona (Task & Await)
-        // Usiamo async void poiché si tratta di un gestore di eventi UI top-level.
+        // Metodo async così l'interfaccia non si blocca ("Non risponde") mentre aspettiamo il C++.
         private async void BtnEncrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
@@ -162,13 +157,11 @@ namespace ByteGuard.Pages
                     item.Status = "Cifratura in corso..."; 
                     FilesDataGrid.Items.Refresh();
 
-                    // Spostiamo il carico computazionale (crittografia C++) su un thread in background.
-                    // In questo modo, l'interfaccia (Main Thread) resta responsiva e non si congela.
+                    // Sposto il lavoro pesante su un thread in background per lasciare libera la UI.
                     await Task.Run(() => 
                     {
-                        // Gestione Eccezioni (Try-Catch Isolato)
-                        // Isoliamo l'operazione. Se un file fallisce, l'eccezione viene catturata qui,
-                        // evitando il blocco totale del ciclo foreach sugli altri file.
+                        // Metto il try-catch qua dentro così se un file dà errore (es. C++ crasha)
+                        // non mi fa saltare tutto il ciclo e passa tranquillamente al file successivo.
                         try
                         {
                             // TODO: Chiamare il servizio C++ per questo singolo file:
@@ -176,7 +169,7 @@ namespace ByteGuard.Pages
                             // Simuliamo il lavoro del modulo C++:
                             System.Threading.Thread.Sleep(500); 
 
-                            // Aggiorniamo la UI usando il Dispatcher poiché Task.Run è su un thread di background.
+                            // Siccome siamo in background, uso Dispatcher per toccare la UI.
                             Dispatcher.Invoke(() => 
                             {
                                 item.Status = "Cifrato (.lock)";
@@ -185,7 +178,7 @@ namespace ByteGuard.Pages
                         }
                         catch (Exception ex)
                         {
-                            // Segnaliamo l'errore sul singolo file e permettiamo al ciclo di continuare.
+                            // Se esplode qualcosa, segnamo l'errore e andiamo avanti col prossimo file
                             Dispatcher.Invoke(() => 
                             {
                                 item.Status = $"Errore: {ex.Message}";
@@ -197,7 +190,7 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Programmazione Asincrona (Task & Await)
+        // Come sopra, metodo async per non bloccare l'interfaccia.
         private async void BtnDecrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
@@ -218,7 +211,7 @@ namespace ByteGuard.Pages
 
                     await Task.Run(() => 
                     {
-                        // Gestione Eccezioni (Try-Catch Isolato)
+                        // Isolo l'eccezione del singolo file
                         try
                         {
                             // TODO: Chiamare il servizio C++ per questo singolo file:

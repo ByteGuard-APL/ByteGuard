@@ -1,6 +1,6 @@
 // ByteGuard - PythonService.cs
-// Gestisce tutta la comunicazione IPC con lo script Python:
-// avvia il processo, legge lo stdout JSON e lo deserializza in un record C#.
+// Classe per gestire l'avvio di Python e leggere i suoi risultati in JSON.
+// Riceve l'output, lo parsa e lo butta dentro il record AnalysisResult.
 
 using System;
 using System.Diagnostics;
@@ -11,9 +11,8 @@ using System.Threading.Tasks;
 
 namespace ByteGuard.Services
 {
-    // Record C# 9+: immutabile per design (proprieta' init-only), value equality automatica.
-    // Usiamo un record invece di una class perche' questo e' un DTO puro: riceve dati,
-    // non li modifica mai. [JsonPropertyName] mappa snake_case Python -> PascalCase C#.
+    // Uso un record invece di una classe perché serve solo a contenere dati che ricevo da Python
+    // e non li devo modificare in giro per il codice. Inoltre mappa lo snake_case di Python nel nostro PascalCase.
     public record AnalysisResult
     {
         [JsonPropertyName("file_path")]
@@ -25,11 +24,11 @@ namespace ByteGuard.Services
         [JsonPropertyName("declared_extension")]
         public string? DeclaredExtension { get; init; }
 
-        /// <summary>Entropia di Shannon [0.0 - 8.0 bit/simbolo]. Sopra 7.0 e' sospetto.</summary>
+        // Entropia da 0 a 8. Se è troppo alta (tipo > 7) puzza di file criptato o compresso male.
         [JsonPropertyName("shannon_entropy")]
         public double ShannonEntropy { get; init; }
 
-        /// <summary>True se il file superava 100 MB e l'entropia e' stata calcolata su un campione (inizio+meta'+fine).</summary>
+        // Vero se il file era troppo grosso e l'ho campionato per non metterci una vita.
         [JsonPropertyName("entropy_sampled")]
         public bool EntropySampled { get; init; }
 
@@ -39,11 +38,11 @@ namespace ByteGuard.Services
         [JsonPropertyName("magic_number_ascii")]
         public string? MagicNumberAscii { get; init; }
 
-        /// <summary>False se i magic byte non corrispondono all'estensione: possibile file mascherato.</summary>
+        // Falso se l'estensione è fake (es. un .exe mascherato da .pdf).
         [JsonPropertyName("extension_match")]
         public bool ExtensionMatch { get; init; }
 
-        /// <summary>"success" o "error". Controlla questo prima di leggere gli altri campi.</summary>
+        // Da guardare subito: può essere "success" o "error".
         [JsonPropertyName("analysis_status")]
         public string AnalysisStatus { get; init; } = "error";
 
@@ -70,16 +69,14 @@ namespace ByteGuard.Services
         private readonly string _pythonExecutable;
         private readonly string _analyzerScriptPath;
 
-        // JsonSerializerOptions e' costoso da creare (compila internamente dei converter):
-        // lo istanziamo una sola volta nel costruttore e lo riusiamo ad ogni chiamata.
+        // Creo le opzioni JSON una volta sola nel costruttore così è più veloce e non le ricreo ad ogni analisi.
         private readonly JsonSerializerOptions _jsonOptions;
 
         public PythonAnalyzerService(string pythonExecutable = "python", string? analyzerScriptPath = null)
         {
             _pythonExecutable = pythonExecutable;
 
-            // Usiamo BaseDirectory come ancora cosi' il percorso funziona sempre,
-            // sia con 'dotnet run' che avviando direttamente l'exe dalla cartella di build.
+            // Uso BaseDirectory così i percorsi funzionano sia da VS Studio che avviando l'exe normalmente.
             _analyzerScriptPath = analyzerScriptPath
                 ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Python", "analyzer.py");
 
@@ -91,21 +88,18 @@ namespace ByteGuard.Services
             };
         }
 
-        /// Avvia analyzer.py come sottoprocesso e restituisce il risultato deserializzato.
-        /// Lancia InvalidOperationException se Python non si avvia, JsonException se l'output non e' JSON valido.
+        // Lancia Python passandogli il file e mi restituisce l'oggetto deserializzato pronto all'uso.
         public async Task<AnalysisResult> AnalyzeFileAsync(string filePath)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = _pythonExecutable,
-                // ArgumentList gestisce automaticamente l'escaping degli spazi nei percorsi
-                // (es. "C:\My Documents\file.pdf"), a differenza della proprieta' Arguments (stringa).
+                // Uso ArgumentList per non impazzire con gli spazi nei percorsi dei file.
                 RedirectStandardOutput = true,
                 RedirectStandardError  = true,
                 UseShellExecute        = false,  // obbligatorio per redirigere I/O
                 CreateNoWindow         = true,
-                // Forza UTF-8 sul decoder della pipe: Python scrive UTF-8,
-                // senza questa riga .NET userebbe cp1252 (default Windows) -> JSON corrotto.
+                // Forzo UTF-8 altrimenti i caratteri strani o accentati mi sballano il JSON.
                 StandardOutputEncoding = System.Text.Encoding.UTF8,
                 StandardErrorEncoding  = System.Text.Encoding.UTF8,
             };
@@ -113,27 +107,22 @@ namespace ByteGuard.Services
             startInfo.ArgumentList.Add(_analyzerScriptPath);
             startInfo.ArgumentList.Add(filePath);
 
-            // 'using' garantisce Process.Dispose() anche in caso di eccezione,
-            // rilasciando l'handle al processo del sistema operativo.
+            // Uso using così se crasha tutto libero la memoria del processo (evito processi zombie)
             using var process = new Process { StartInfo = startInfo };
             process.Start();
 
-            // Leggiamo stdout e stderr in parallelo con WhenAll: e' fondamentale.
-            // Se aspettassimo prima uno poi l'altro, i buffer della pipe potrebbero
-            // riempirsi e causare un deadlock (Python aspetta che C# svuoti il buffer,
-            // C# aspetta che Python finisca -> stallo).
+            // Leggo output ed errori in parallelo per evitare che la pipe si intasi e si blocchi tutto all'infinito.
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             await Task.WhenAll(stdoutTask, stderrTask);
 
-            // WaitForExitAsync va DOPO la lettura degli stream, non prima (vedi deadlock sopra).
+            // Aspetto che Python si chiuda DOPO aver letto tutto.
             await process.WaitForExitAsync();
 
             string jsonOutput   = stdoutTask.Result.Trim();
             string stderrOutput = stderrTask.Result.Trim();
 
-            // Stdout vuoto = Python e' crashato prima di stampare qualcosa (es. SyntaxError).
-            // In quel caso lo stderr contiene il traceback Python.
+            // Se Python non stampa nulla vuol dire che è crashato malissimo (es. errore di sintassi).
             if (string.IsNullOrWhiteSpace(jsonOutput))
             {
                 string msg = string.IsNullOrWhiteSpace(stderrOutput)
@@ -142,7 +131,7 @@ namespace ByteGuard.Services
                 throw new InvalidOperationException(msg);
             }
 
-            // ?? throw: gestisce il caso estremo in cui il JSON sia il letterale "null"
+            // Se per caso Deserialize mi dà null, lancio un'eccezione per non impazzire a cercare l'errore dopo.
             AnalysisResult result = JsonSerializer.Deserialize<AnalysisResult>(jsonOutput, _jsonOptions)
                 ?? throw new JsonException("La deserializzazione ha restituito null inatteso.");
 
