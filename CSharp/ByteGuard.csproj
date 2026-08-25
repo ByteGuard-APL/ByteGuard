@@ -27,4 +27,16 @@
     <Resource Include="AppIcon.ico" />
   </ItemGroup>
 
+  <!--
+    Pre-build automatico del modulo Go.
+    Evita di buildare manualmente il watchdog Go prima di compilare ByteGuard.
+  -->
+  <Target Name="BuildGoWatchdog" BeforeTargets="Build">
+    <Message Text="--- ByteGuard: compilazione watchdog Go in corso... ---" Importance="high" />
+    <Exec Command="go build -o watchdog.exe ."
+          WorkingDirectory="..\watchdog-go"
+          ConsoleToMSBuild="true" />
+    <Message Text="--- ByteGuard: watchdog.exe pronto. ---" Importance="high" />
+  </Target>
+
 </Project>
