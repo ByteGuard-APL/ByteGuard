@@ -156,9 +156,6 @@ func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// watchdog — La Routine Produttore (Polling)
-// ─────────────────────────────────────────────────────────────────────────────
 // Watchdog (Produttore): effettua polling temporizzato sulla directory per
 // rilevare file nuovi, modificati o cancellati.
 // Utilizziamo time.NewTicker al posto di time.Tick per poter richiamare
