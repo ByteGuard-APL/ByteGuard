@@ -1,20 +1,7 @@
 // =============================================================================
 // ByteGuard — Modulo Go: Monitoraggio e Watchdog (Worker Pool Architecture)
-// =============================================================================
-//
-// NOTA ACCADEMICA — Filosofia Concorrente in Go
-// ─────────────────────────────────────────────
-// "Do not communicate by sharing memory; instead, share memory by communicating."
-// (Non comunicare condividendo la memoria; condividi la memoria comunicando).
-// Questo è il principio cardine della concorrenza in Go, derivato dal calcolo
-// dei processi comunicanti (CSP) di Tony Hoare.
-//
-// In questo modulo applichiamo questo principio tramite l'architettura
-// "Worker Pool". I dati (i percorsi dei file da analizzare) fluiscono dal
-// produttore (la routine di monitoraggio) ai consumatori (i worker)
-// esclusivamente attraverso un canale (channel) tipizzato e thread-safe,
-// eliminando la necessità di lock espliciti per la condivisione dei task.
-//
+// Implementa il pattern Produttore-Consumatore tramite canali (channels)
+// per la gestione concorrente e thread-safe dell'analisi forense.
 // =============================================================================
 
 package main
@@ -32,13 +19,8 @@ import (
 	"time"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Strutture Dati per IPC (Inter-Process Communication) via JSON
-// ─────────────────────────────────────────────────────────────────────────────
-// Usiamo strutture fortemente tipizzate per garantire che l'output su Stdout
-// rispetti esattamente il contratto richiesto dalla GUI C#.
-// Utilizziamo l'Exported Name convention: i campi iniziano con lettera
-// maiuscola per essere visibili all'esterno del package (necessario per il marshaling JSON).
+// Strutture Dati per IPC (Inter-Process Communication).
+// I JSON tag mappano esattamente l'output per la deserializzazione in C#.
 
 type EventWatchStarted struct {
 	Event  string `json:"event"` // questi tag sono metadati per il marshaling JSON, specificando il nome del campo nell'output JSON
@@ -46,6 +28,11 @@ type EventWatchStarted struct {
 }
 
 type EventFileDetected struct {
+	Event string `json:"event"`
+	File  string `json:"file"`
+}
+
+type EventFileDeleted struct {
 	Event string `json:"event"`
 	File  string `json:"file"`
 }
@@ -80,56 +67,33 @@ type EventGeneric struct {
 	Message string `json:"message,omitempty"` // `omitempty` indica al marshaler di omettere il campo se è vuoto (stringa vuota)
 }
 
-// outputMutex garantisce che la scrittura su os.Stdout sia atomica.
-// Sebbene le scritture brevi su file descriptor POSIX possano essere atomiche,
-// l'uso di json.Encoder o di scritture multiple impone l'uso di un Mutex per
-// evitare l'interleaving (accavallamento) dei caratteri generati da diverse
-// goroutine (dato che condividono lo stesso address space), che produrrebbe JSON non valido (fatal error per il parser C#).
+// outputMutex garantisce che la scrittura concorrente su os.Stdout sia atomica,
+// evitando interleaving di caratteri che causerebbe JSON malformato letto da C#.
+
 var outputMutex sync.Mutex
 
 // emitJSON serializza in modo sicuro l'oggetto e lo stampa su stdout con newline.
+
 func emitJSON(v interface{}) {
 	// Acquisizione esclusiva del lock prima di interagire con lo stream I/O condiviso.
 	outputMutex.Lock()
-	// Il costrutto defer accoda l'esecuzione della funzione di Unlock al momento
-	// in cui la funzione enclosing (emitJSON) esegue il return. Questo pattern
-	// idiomatico assicura il rilascio del lock anche in caso di panic, prevenendo deadlock.
 	defer outputMutex.Unlock()
 
 	data, err := json.Marshal(v)
 	if err == nil {
 		fmt.Println(string(data))
 	} else {
-        // GESTIONE DELL'ERRORE:
-        // Se il marshaling fallisce (improbabile con le nostre struct,
-        // ma doveroso a livello accademico), costruiamo una stringa JSON di emergenza "a mano"
-        // e la stampiamo per informare C# del disastro.
 		fallbackJSON := fmt.Sprintf(`{"event": "error", "message": "Errore interno di serializzazione JSON: %v"}`, err)
 		fmt.Println(fallbackJSON)
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// worker — La Routine Consumatore
-// ─────────────────────────────────────────────────────────────────────────────
-// NOTA ACCADEMICA — Ciclo di Vita della Goroutine e Prevenzione Leak
-// ─────────────────────────────────────────────────────────────────────────────
-// Un "Goroutine Leak" si verifica quando una goroutine rimane bloccata per
-// sempre in attesa su un canale che non verrà mai scritto né chiuso, o
-// quando esegue un loop infinito senza condizioni di uscita.
-//
-// In Go, la chiusura di un canale funge da segnale di "broadcast" (End-Of-Stream).
-// Il costrutto `for job := range jobs` terminerà in modo naturale, e la
-// goroutine uscirà dal loop, non appena il canale `jobs` verrà chiuso e
-// svuotato di tutti i task pendenti.
-//
-// Il parametro `*sync.WaitGroup` serve per orchestrare il Graceful Shutdown.
-// Il WaitGroup è passato tramite puntatore (*sync.WaitGroup) poiché in Go il passaggio
-// di default è Pass by Value; passando il puntatore modifichiamo i dati sottostanti.
-// La goroutine segnala la propria terminazione chiamando `wg.Done()`.
+// Worker (Consumatore): elabora i task presi dal channel.
+// Il loop for-range garantisce la terminazione naturale della goroutine
+// alla chiusura del canale, prevenendo goroutine leaks.
+// Il WaitGroup orchestra il Graceful Shutdown.
+
 func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
-	// defer wg.Done() viene valutato all'ingresso della funzione ma eseguito
-	// rigorosamente all'uscita. È il pattern idiomatico per i WaitGroup.
 	defer wg.Done()
 
 	// Costruiamo il percorso relativo per lo script Python.
@@ -137,9 +101,6 @@ func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
 	// automaticamente gli slash '/' su Linux o backslash '\' su Windows).
 	pythonScriptPath := filepath.Join("..", "Python", "analyzer.py")
 
-	// Range and Close: il loop for-range riceve valori dal channel ripetutamente
-	// finché questo non viene chiuso dal sender. Questo previene i "Goroutine Leak",
-	// permettendo alla goroutine di terminare in modo naturale quando non ci sono più job.
 	for file := range jobs {
 		// 1. Invocazione del Sottoprocesso Python
 		// exec.Command prepara il processo isolato.
@@ -198,23 +159,16 @@ func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
 // ─────────────────────────────────────────────────────────────────────────────
 // watchdog — La Routine Produttore (Polling)
 // ─────────────────────────────────────────────────────────────────────────────
-// NOTA ACCADEMICA — Polling, Ticker e Prevenzione Memory Leak
-// ─────────────────────────────────────────────────────────────────────────────
-// Questa funzione implementa un polling temporizzato sulla directory.
-//
-// Abbiamo scelto di utilizzare `time.NewTicker` accoppiato a `defer ticker.Stop()`.
-// Come spiegato nella teoria (Package time), l'uso della funzione `time.Tick`
-// non permette di arrestare il timer sottostante, causando un "leak" nel Garbage
-// Collector quando la goroutine deve terminare. Il nostro approccio con `NewTicker`
-// previene questo leak garantendo lo spegnimento del timer al termine della routine.
-//
-// Il costrutto `select` permette alla goroutine di dormire senza consumare CPU,
-// svegliandosi solo allo scoccare del timer (ticker.C) o in caso di ricezione
-// del segnale di cancellazione (done).
+// Watchdog (Produttore): effettua polling temporizzato sulla directory per
+// rilevare file nuovi, modificati o cancellati.
+// Utilizziamo time.NewTicker al posto di time.Tick per poter richiamare
+// esplicitamente ticker.Stop() e prevenire resource leaks all'uscita.
 func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	seenFiles := make(map[string]bool) // Mappa utilizzata come Set in O(1) per tracciare i file.
+	// Tracciamo non solo la presenza del file, ma la data di ultima modifica (ModTime).
+	// Questo ci permette di ri-analizzare i file se vengono alterati/sovrascritti.
+	seenFiles := make(map[string]time.Time)
 
 	// Istanziamento del Ticker. Fornisce un channel (C) che invia il tick a intervalli regolari.
 	ticker := time.NewTicker(1 * time.Second)
@@ -222,11 +176,11 @@ func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.
 	defer ticker.Stop()
 
 	for {
-		// Il costrutto select blocca finché uno dei case di comunicazione non è pronto.
+		// Il costrutto select blocca senza consumare CPU finché uno dei case di comunicazione non è pronto.
 		select {
 		case <-done:
 			// Cancellation Signal: se il canale `done` viene chiuso dal main,
-			// usciamo dal loop e la goroutine termina (eseguendo i defer).
+			// usciamo dal loop e la goroutine termina in modo naturale.
 			return
 
 		case <-ticker.C:
@@ -237,6 +191,9 @@ func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.
 				continue
 			}
 
+			// Mappa per tracciare i file fisicamente presenti in questo esatto ciclo di polling.
+			currentFiles := make(map[string]bool)
+
 			// Iteriamo sul contenuto della directory
 			for _, entry := range entries {
 				if entry.IsDir() {
@@ -244,12 +201,30 @@ func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.
 				}
 
 				name := entry.Name()
+				fullPath := filepath.Join(folder, name)
 
-				if !seenFiles[name] {
-					// Nuovo file rilevato!
-					seenFiles[name] = true // Marcalo come visto
+				// Estraiamo i metadati per ottenere il Timestamp di modifica
+				info, err := entry.Info()
+				if err != nil {
+					// Usiamo l'EventGeneric per segnalare che c'è un file "fantasma" o inaccessibile.
+					emitJSON(EventGeneric{
+						Event:   "error",
+						Message: fmt.Sprintf("Accesso negato o file sparito (%s): impossibile leggere i metadati. Dettaglio: %v", name, err),
+					})
+					continue // Saltiamo l'elaborazione di questo file per questo giro
+				}
+				modTime := info.ModTime()
 
-					fullPath := filepath.Join(folder, name)
+				// Segniamo che il file esiste attualmente
+				currentFiles[name] = true
+
+				lastSeenTime, exists := seenFiles[name]
+
+				// Rilevamento: il file è NUOVO (!exists) oppure è stato MODIFICATO (modTime.After)
+				if !exists || modTime.After(lastSeenTime) {
+					// Aggiorniamo la memoria del watchdog con il nuovo timestamp
+					seenFiles[name] = modTime
+
 					emitJSON(EventFileDetected{
 						Event: "file_detected",
 						File:  fullPath,
@@ -266,6 +241,25 @@ func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.
 						// Shutdown richiesto mentre si attendeva di inviare il job.
 						return
 					}
+				}
+			}
+
+			// ─────────────────────────────────────────────────────────────────
+			// Fase di Cleanup: Rilevamento file CANCELLATI
+			// ─────────────────────────────────────────────────────────────────
+			// Confrontiamo la nostra memoria storica (seenFiles) con il presente (currentFiles).
+			for name := range seenFiles {
+				if !currentFiles[name] {
+					// Il file era nella mappa 'seenFiles' ma non esiste più fisicamente
+					deletedPath := filepath.Join(folder, name)
+
+					emitJSON(EventFileDeleted{
+						Event: "file_deleted",
+						File:  deletedPath,
+					})
+
+					// Rimuoviamolo dalla nostra memoria per mantenere sincronizzato lo stato
+					delete(seenFiles, name)
 				}
 			}
 		}
@@ -286,22 +280,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Inizializzazione Worker Pool e Canali
-	// ─────────────────────────────────────────────────────────────────────────────
-	// NOTA ACCADEMICA — Canali Bufferizzati vs Non Bufferizzati
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Usiamo un canale **bufferizzato** (capacità 100).
-	// Un canale non bufferizzato (capacità 0) forza una sincronizzazione stretta
-	// In un sistema di monitoraggio file I/O-bound, questo è sub-ottimale.
-	// Se l'OS scrive 50 file in rapida successione in un millisecondo, e abbiamo
-	// solo 8 worker, il watchdog si bloccherebbe al nono file. Usando un buffer,
-	// il watchdog può "scaricare" il burst di task nel canale e continuare
-	// il monitoraggio senza interruzioni. Il blocco avviene (Backpressure)
-	// solo se il buffer di 100 si riempie totalmente.
-    // Buffered Channel: forniamo la lunghezza del buffer come secondo argomento
-	// a make. Un send verso un buffered channel si blocca (blocks) solo quando
-	// il buffer è pieno. Questo disaccoppia i tempi di latenza I/O tra watchdog e workers.
+	// Canale bufferizzato per disaccoppiare la latenza I/O tra watchdog e worker.
+	// Introduce una backpressure se i worker non riescono a smaltire i burst di file.
 	jobs := make(chan string, 100)
 
 	// Canale di controllo per lo shutdown del watchdog (non bufferizzato)
@@ -313,7 +293,7 @@ func main() {
 	var workersWg sync.WaitGroup
 	var watchdogWg sync.WaitGroup
 
-	numWorkers := max(runtime.NumCPU() / 2, 1) // Ottimale per CPU-bound, accettabile per mock I/0
+	numWorkers := max(runtime.NumCPU() / 2, 1)
 
 	// Avvio del Pool di Worker
 	for i := 1; i <= numWorkers; i++ {
@@ -330,13 +310,9 @@ func main() {
 		Folder: targetFolder,
 	})
 
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Graceful Shutdown e Gestione dei Segnali
-	// ─────────────────────────────────────────────────────────────────────────────
-	// Il S.O. invia segnali per richiedere la terminazione (SIGINT = Ctrl+C,
-	// SIGTERM = terminazione da un process manager come systemd o C# Process.Kill).
-	// Ignorare questi segnali causerebbe un "Hard Kill", corrompendo le analisi
-	// in corso. Intercettandoli, implementiamo un "Graceful Shutdown".
+	// Intercettazione segnali OS (SIGINT/SIGTERM) per Graceful Shutdown.
+	// Evita la corruzione bloccando l'hard-kill del processo.
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
@@ -356,10 +332,8 @@ func main() {
 	watchdogWg.Wait()
 
 	// 3. Ora che il produttore è terminato, è sicuro chiudere il canale `jobs`.
-	// In Go, tentare di scrivere in un canale chiuso causa un Panic fatale.
-	// Chiudendolo, segnaliamo ai worker che non arriveranno nuovi task.
-    // Come regola di design di Go: "Only the sender should close a channel, never the receiver".
-	// Ora che il produttore (watchdog) è chiuso, chiudiamo jobs.
+	// In Go, solo il sender deve chiudere un canale. Essendo il watchdog terminato,
+	// possiamo chiudere il canale jobs in sicurezza.
 	close(jobs)
 
 	// 4. Attendiamo che i consumatori (Worker) completino l'elaborazione
