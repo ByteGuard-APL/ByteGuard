@@ -221,21 +221,6 @@ func watchdog(folder string, jobs chan<- string, done <-chan struct{}, wg *sync.
 	// Garantisce il recupero delle risorse da parte del Garbage Collector all'uscita.
 	defer ticker.Stop()
 
-	/* MODIFICA: Il codice originale censiva i file esistenti per ignorarli,
-	   analizzando solo i NUOVI file. Abbiamo commentato questa sezione in modo che 
-	   al primo avvio il Watchdog rilevi e processi automaticamente tutti i file pre-esistenti
-	   nella cartella.
-	// Lettura iniziale per popolare lo stato senza triggerare eventi per i file pre-esistenti.
-	entries, err := os.ReadDir(folder)
-	if err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				seenFiles[entry.Name()] = true
-			}
-		}
-	}
-	*/
-
 	for {
 		// Il costrutto select blocca finché uno dei case di comunicazione non è pronto.
 		select {
@@ -328,7 +313,7 @@ func main() {
 	var workersWg sync.WaitGroup
 	var watchdogWg sync.WaitGroup
 
-	numWorkers := max(runtime.NumCPU(), 2) // Ottimale per CPU-bound, accettabile per mock I/0, casomai metti / 2 per i core
+	numWorkers := max(runtime.NumCPU() / 2, 1) // Ottimale per CPU-bound, accettabile per mock I/0
 
 	// Avvio del Pool di Worker
 	for i := 1; i <= numWorkers; i++ {
