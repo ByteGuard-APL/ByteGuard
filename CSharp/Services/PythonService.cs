@@ -56,6 +56,9 @@ namespace ByteGuard.Services
         [JsonPropertyName("is_anomalous")]
         public bool IsAnomalous { get; init; }
 
+        [JsonPropertyName("has_double_extension")]
+        public bool HasDoubleExtension { get; init; }
+
         // Testo esplicativo dell'anomalia determinato dal motore Python
         [JsonPropertyName("verdict")]
         public string Verdict { get; init; } = "Sano";

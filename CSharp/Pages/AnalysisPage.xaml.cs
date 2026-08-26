@@ -128,15 +128,13 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Avvio l'eseguibile Go in background e leggo cosa stampa riga per riga.
+        // Avvia il processo Go in background e ne intercetta l'output riga per riga.
         private async Task StartWatchdogAsync(string folder)
         {
-            // Risalgo un po' di cartelle per trovare l'eseguibile Go compilato.
-            string watchdogDir = Path.GetFullPath(
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "watchdog-go"));
-            string watchdogExe = Path.Combine(watchdogDir, "watchdog.exe");
+            // Grazie all'istruzione Copy nel .csproj, il binario si trova nella cartella base dell'eseguibile.
+            string watchdogExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "watchdog.exe");
 
-            // Se mi scordo di fare 'go build', avviso invece di far finta di nulla.
+            // Validazione pre-esecuzione: gestisco l'eventuale assenza dell'eseguibile Go compilato.
             if (!File.Exists(watchdogExe))
             {
                 MessageBox.Show(
@@ -155,24 +153,26 @@ namespace ByteGuard.Pages
                 UseShellExecute        = false, 
                 CreateNoWindow         = true,
                 
-                // Metto la working directory giusta altrimenti Go non trova lo script Python
-                WorkingDirectory       = watchdogDir,
+                // Il modulo Go cerca lo script Python in "..\Python\analyzer.py".
+                // Impostando la WorkingDirectory nella sottocartella "Python", il path
+                // relativo calcolato da Go (..) punterà correttamente alla BaseDirectory.
+                WorkingDirectory       = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Python"),
                 
-                // Forzo UTF-8 sennò i percorsi con gli accenti si spaccano
+                // Forza la codifica UTF-8 per prevenire eccezioni sui percorsi contenenti caratteri Unicode.
                 StandardOutputEncoding = System.Text.Encoding.UTF8,
             };
 
             // Passo la cartella come argomento
             startInfo.ArgumentList.Add(folder);
 
-            // Salvo il processo così posso killarlo dopo col bottone Stop
+            // Mantengo il riferimento al processo per consentire la terminazione forzata (Stop) in seguito.
             _watchdogProcess = new Process { StartInfo = startInfo };
 
             try
             {
                 _watchdogProcess.Start();
 
-                // Leggo quello che Go stampa (che è sempre JSON) riga per riga
+                // Ascolto continuo dello stdout riga per riga (streaming JSON da Go)
                 using var reader = _watchdogProcess.StandardOutput;
                 string? line;
                 while ((line = await reader.ReadLineAsync()) != null)
@@ -185,7 +185,7 @@ namespace ByteGuard.Pages
                     }
                     catch (JsonException)
                     {
-                        // Se Go va in crash o stampa roba strana (panic), lo ignoro per non far crashare il C#
+                        // Ignora log diagnostici o panics di Go per preservare la stabilità del thread UI C#
                         Debug.WriteLine($"[ByteGuard] Riga non-JSON ignorata da Go: {line}");
                     }
                 }
@@ -207,7 +207,8 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Legge il JSON da Go usando JsonDocument così non devo creare mille classi DTO.
+        // Esegue il parsing polimorfico degli eventi Go utilizzando JsonDocument
+        // per evitare l'overhead di definire gerarchie complesse di DTO.
         private void DispatchGoEvent(string jsonLine)
         {
             using JsonDocument doc = JsonDocument.Parse(jsonLine);
@@ -226,8 +227,28 @@ namespace ByteGuard.Pages
                     break;
 
                 case "file_detected":
-                    string? file = root.GetProperty("file").GetString();
-                    Dispatcher.InvokeAsync(() => TxtGlobalStatus.Text = $"Rilevato: {Path.GetFileName(file)}");
+                    // Questo evento copre sia file nuovi che file modificati.
+                    // Non facciamo nient'altro qui: ci penserà l'analysis_completed quando Go finisce l'analisi.
+                    string? detectedFile = root.GetProperty("file").GetString();
+                    Dispatcher.InvokeAsync(() => TxtGlobalStatus.Text = $"Rilevato: {Path.GetFileName(detectedFile)}");
+                    break;
+
+                case "file_deleted":
+                    // Un file che stavamo monitorando è stato eliminato dalla cartella.
+                    // Lo rimuoviamo dalla griglia se è presente.
+                    string? deletedFile = root.GetProperty("file").GetString();
+                    if (deletedFile != null)
+                    {
+                        Dispatcher.InvokeAsync(() =>
+                        {
+                            var toRemove = ScannedFiles.FirstOrDefault(r => r.FilePath == deletedFile);
+                            if (toRemove != null)
+                            {
+                                ScannedFiles.Remove(toRemove);
+                                TxtGlobalStatus.Text = $"Rimosso: {Path.GetFileName(deletedFile)}";
+                            }
+                        });
+                    }
                     break;
 
                 case "analysis_completed":
@@ -264,9 +285,7 @@ namespace ByteGuard.Pages
             }
         }
 
-        /// <summary>
-        /// Termina manualmente il processo Watchdog Go, se attivo.
-        /// </summary>
+        // Termina il processo Go quando l'utente preme Stop
         private void BtnStopWatchdog_Click(object sender, RoutedEventArgs e)
         {
             try
@@ -285,29 +304,31 @@ namespace ByteGuard.Pages
             finally
             {
                 _watchdogProcess = null;
-                // SetUiReady ripristina tutto: bottoni, drop zone e status bar
                 SetUiReady();
                 BtnStopWatchdog.Visibility = Visibility.Collapsed;
             }
         }
 
-        /// <summary>
-        /// Metodo pubblico che verrà chiamato dall'oratore (es. ascoltatore dello stdout di Go)
-        /// per inserire i risultati in tempo reale nella DataGrid.
-        /// </summary>
+        // Aggiunge (o aggiorna) un risultato nella griglia in tempo reale.
+        // Se il file era già in lista (caso: file modificato e rianalizzato), sostituiamo la vecchia riga.
         public void UpdateGridDynamically(AnalysisResult result)
         {
-            // Assicuriamoci di essere sul thread della UI se veniamo chiamati da un thread in background
             Dispatcher.InvokeAsync(() =>
             {
+                // Se il file era già in lista lo rimuovo prima di reinserirlo aggiornato
+                var existing = ScannedFiles.FirstOrDefault(r => r.FilePath == result.FilePath);
+                if (existing != null)
+                    ScannedFiles.Remove(existing);
+
+                // Metto le anomalie in cima così saltano subito all'occhio
                 if (result.IsAnomalous)
-                {
                     ScannedFiles.Insert(0, result);
-                }
                 else
-                {
                     ScannedFiles.Add(result);
-                }
+
+                // Ricalcolo il contatore delle anomalie ogni volta
+                int anomalyCount = ScannedFiles.Count(r => r.IsAnomalous);
+                TxtAnomalyCount.Text = $"Anomalie: {anomalyCount}";
             });
         }
 
@@ -518,6 +539,12 @@ namespace ByteGuard.Pages
             else
             {
                 TxtSanityCheck.Text       = string.Format("FALLITO — magic byte incompatibili con '{0}'", result.DeclaredExtension);
+                TxtSanityCheck.Foreground = BrushDanger;
+            }
+
+            if (result.HasDoubleExtension)
+            {
+                TxtSanityCheck.Text += "\n⚠️ ATTENZIONE: Doppia estensione rilevata (Possibile camuffamento!)";
                 TxtSanityCheck.Foreground = BrushDanger;
             }
 

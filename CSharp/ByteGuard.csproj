@@ -28,6 +28,27 @@
   </ItemGroup>
 
   <!--
+    Pre-build automatico del modulo C++.
+    L'exe viene prodotto in core-cpp/build/ByteGuardCrypto.exe.
+  -->
+  <PropertyGroup>
+    <GppPath Condition="Exists('C:\msys64\ucrt64\bin\g++.exe')">"C:\msys64\ucrt64\bin\g++.exe"</GppPath>
+    <GppPath Condition="'$(GppPath)' == ''">g++</GppPath>
+  </PropertyGroup>
+
+  <Target Name="BuildCppCrypto" BeforeTargets="BuildGoWatchdog">
+    <MakeDir Directories="..\core-cpp\build" Condition="!Exists('..\core-cpp\build')" />
+    <Message Text="--- ByteGuard: compilazione modulo C++ con g++... ---" Importance="high" />
+    <Exec Command="$(GppPath) -std=c++20 -O2 ..\core-cpp\src\main.cpp ..\core-cpp\src\ByteGuardCrypto.cpp -I..\core-cpp\include -I..\core-cpp\third_party -o ..\core-cpp\build\ByteGuardCrypto.exe"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true"
+          ContinueOnError="true" />
+    <!-- Copia l'exe nella cartella di output (bin/Debug) -->
+    <Copy SourceFiles="..\core-cpp\build\ByteGuardCrypto.exe" DestinationFolder="$(OutDir)" ContinueOnError="true" />
+    <Message Text="--- ByteGuard: ByteGuardCrypto.exe pronto. ---" Importance="high" />
+  </Target>
+
+  <!--
     Pre-build automatico del modulo Go.
     Evita di buildare manualmente il watchdog Go prima di compilare ByteGuard.
   -->
@@ -36,6 +57,8 @@
     <Exec Command="go build -o watchdog.exe ."
           WorkingDirectory="..\watchdog-go"
           ConsoleToMSBuild="true" />
+    <!-- Copia l'exe nella cartella di output (bin/Debug) -->
+    <Copy SourceFiles="..\watchdog-go\watchdog.exe" DestinationFolder="$(OutDir)" />
     <Message Text="--- ByteGuard: watchdog.exe pronto. ---" Importance="high" />
   </Target>
 

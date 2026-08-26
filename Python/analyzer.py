@@ -24,16 +24,9 @@ except AttributeError:
     pass  # stdout non e' una pipe (es. esecuzione in unit test): nessun problema
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Gestione Warning — Defense in Depth
-# ─────────────────────────────────────────────────────────────────────────────
-# stdout e' il canale IPC strutturato (JSON) verso Go/C#: deve contenere SOLO JSON.
-# stderr e' il canale diagnostico: Python vi scrive i DeprecationWarning, ecc.
-# Il modulo Go usa CombinedOutput() che mescola i due stream: se un warning
-# finisse su stderr, Go invierebbe JSON malformato a C#.
-#
-# Soluzione: reindirizziamo i warning verso un file di log dedicato.
-# Cosi' non vengono persi (sono consultabili) ma non inquinano lo stdout.
+# Redirigo i warning (es. librerie deprecate) su un file di log separato anziché su stdout.
+# Questo è fondamentale perché lo stdout funge da canale IPC verso il modulo Go,
+# e inserire testo libero comprometterebbe il parsing del JSON.
 log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byteguard_warnings.log")
 logging.basicConfig(
     filename=log_path,
@@ -43,15 +36,13 @@ logging.basicConfig(
 logging.captureWarnings(True)  # Intercetta tutti i warning di Python e li invia al logger
 
 
-# Mappa estensione -> magic bytes attesi all'inizio del file binario.
-# Se il file binario non inizia con questi byte, l'estensione e' probabilmente falsa.
+# Mappa delle estensioni e dei loro magic bytes attesi.
+# Se il file binario non inizia con questi byte, l'estensione probabilmente è finta.
 #
-# NOTA FORENSE SUI FILE DI TESTO (.txt, .json, .csv, .html, .xml):
-# Questi formati sono intenzionalmente ESCLUSI da questo dizionario perche' non
-# possiedono magic bytes deterministici all'offset 0 (potrebbero iniziare con
-# spazi, BOM o andare a capo). Il motore li gestisce tramite "Spoofing Inverso":
-# verifica che il testo NON inizi con i magic bytes di formati binari noti,
-# intercettando cosi' eseguibili rinominati (es. malware.exe -> leggimi.txt).
+# Ho escluso volontariamente i file di testo (.txt, .json, ecc.) perché
+# non hanno magic bytes all'inizio (possono iniziare con spazi o a capo).
+# Quindi per i file di testo faccio il controllo al contrario: verifico che 
+# NON inizino con i magic bytes di file binari noti (es. un .exe rinominato in .txt).
 MAGIC_NUMBERS: dict[str, bytes] = {
     ".pdf":  b"%PDF-",
     ".png":  b"\x89PNG\r\n\x1a\n",
@@ -67,11 +58,12 @@ MAGIC_NUMBERS: dict[str, bytes] = {
     ".gz":   b"\x1f\x8b",
 }
 
-# Quanti byte leggere per il riconoscimento del magic number
+# Leggo solo i primi 16 byte per riconoscere il magic number, che sono sufficienti per le intestazioni comuni.
 MAGIC_BYTES_READ_COUNT = 16
 
-# Soglia oltre la quale si usa il campionamento invece della lettura completa.
-# Sotto questa dimensione il file viene letto intero: e' veloce e preciso al 100%.
+# Soglia per il campionamento dell'entropia.
+# Se il file è sotto i 100 MB lo leggo interamente per una precisione esatta,
+# altrimenti applico il campionamento per evitare la saturazione della memoria (OOM).
 SAMPLING_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
@@ -102,6 +94,32 @@ def calculate_shannon_entropy(data: bytes) -> float:
     return entropy
 
 
+def check_double_extension(file_name: str) -> bool:
+    """
+    Verifica se il file ha una doppia estensione usata per camuffamento (es. 'documento.pdf.exe').
+    Ignora file nascosti e compound legittimi come '.tar.gz'.
+    """
+    # Ignoriamo il punto iniziale dei file nascosti Linux/Mac
+    if file_name.startswith('.'):
+        file_name = file_name[1:]
+        
+    parts = file_name.split('.')
+    if len(parts) >= 3:
+        inner_ext = f".{parts[-2]}".lower()
+        outer_ext = f".{parts[-1]}".lower()
+        
+        # Eccezioni legittime comuni
+        if inner_ext == ".tar" and outer_ext in [".gz", ".xz", ".bz2"]:
+            return False
+            
+        # Elenco di estensioni spesso usate per ingannare l'utente
+        spoofed_exts = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".jpg", ".png", ".zip", ".csv"}
+        if inner_ext in spoofed_exts:
+            return True
+            
+    return False
+
+
 def get_expected_profile(extension: str) -> str:
     """Restituisce il profilo di entropia atteso per una data estensione."""
     ext = (extension or "").lower()
@@ -113,12 +131,15 @@ def get_expected_profile(extension: str) -> str:
         return "TEXT"
     return "EXECUTABLE"  # default conservativo per tipi non noti
 
-def evaluate_forensic_verdict(entropy: float, extension_match: bool, extension: str) -> tuple[bool, str, str]:
+def evaluate_forensic_verdict(entropy: float, extension_match: bool, extension: str, has_double_ext: bool) -> tuple[bool, str, str]:
     """
     Applica le regole euristiche per determinare se il file e' anomalo,
     basandosi sull'entropia e sull'eventuale spoofing dell'estensione.
     Restituisce (is_anomalous, verdict, anomaly_code).
     """
+    if has_double_ext:
+        return True, "Doppia estensione sospetta (possibile camuffamento)", "DOUBLE_EXTENSION"
+
     if not extension_match:
         return True, "File camuffato (Magic bytes errati)", "MAGIC_MISMATCH"
         
@@ -219,8 +240,11 @@ def analyze_magic_numbers(header_bytes: bytes, declared_extension: str) -> dict:
 def analyze_file(file_path: str) -> dict:
     """Apre il file in modalita' binaria, calcola entropia e magic numbers, restituisce il payload."""
     abs_path = os.path.abspath(file_path)
+    file_name = os.path.basename(abs_path)
     _, extension = os.path.splitext(abs_path)
     file_size = os.path.getsize(abs_path)
+    
+    has_double_ext = check_double_extension(file_name)
 
     # 'rb' e' obbligatorio: nessuna decodifica testo, legge byte grezzi
     with open(abs_path, "rb") as f:
@@ -242,7 +266,7 @@ def analyze_file(file_path: str) -> dict:
     entropy = calculate_shannon_entropy(content_for_entropy)
     magic_info = analyze_magic_numbers(header_bytes, extension)
     
-    is_anomalous, verdict, anomaly_code = evaluate_forensic_verdict(entropy, magic_info["extension_match"], extension)
+    is_anomalous, verdict, anomaly_code = evaluate_forensic_verdict(entropy, magic_info["extension_match"], extension, has_double_ext)
     
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -252,6 +276,7 @@ def analyze_file(file_path: str) -> dict:
         "declared_extension": extension if extension else "(none)",
         "shannon_entropy": round(entropy, 6),
         "entropy_sampled": entropy_sampled,  # True = valore approssimato (file > 100 MB)
+        "has_double_extension": has_double_ext,
         **magic_info,
         "is_anomalous": is_anomalous,
         "verdict": verdict,
@@ -275,6 +300,7 @@ def build_error_payload(file_path: str, error: Exception) -> dict:
         "declared_extension": None,
         "shannon_entropy": 0.0,
         "entropy_sampled": False,
+        "has_double_extension": False,
         "magic_number_hex": None,
         "magic_number_ascii": None,
         "extension_match": False,

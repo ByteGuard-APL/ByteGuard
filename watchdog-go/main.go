@@ -44,6 +44,7 @@ type PythonAnalysisResult struct {
 	DeclaredExtension string  `json:"declared_extension"`
 	ShannonEntropy    float64 `json:"shannon_entropy"`
 	EntropySampled    bool    `json:"entropy_sampled"`
+	HasDoubleExtension bool    `json:"has_double_extension"`
 	MagicNumberHex    string  `json:"magic_number_hex"`
 	MagicNumberAscii  string  `json:"magic_number_ascii"`
 	ExtensionMatch    bool    `json:"extension_match"`
