@@ -1,40 +1,56 @@
 # ByteGuard - Progetto APL
 
-ByteGuard e' un'applicazione desktop scritta in C# (WPF) per l'analisi forense e la crittografia dei file. Utilizza un modulo in Go per fare da Watchdog sulle cartelle e un modulo in Python per analizzare l'entropia e i magic bytes dei file.
+ByteGuard è un'applicazione desktop scritta in C# (WPF) per l'analisi forense e la crittografia dei file. È un progetto multi-linguaggio che sfrutta i punti di forza di diverse tecnologie:
+- **C# (WPF)**: Interfaccia grafica fluida e reattiva, e orchestrazione dei processi.
+- **Go**: Watchdog concorrente ad alte prestazioni per il monitoraggio in tempo reale delle cartelle.
+- **Python**: Motore flessibile per l'analisi forense (entropia di Shannon e spoofing dei Magic Bytes).
+- **C++**: Modulo ad alte prestazioni per la cifratura e decifratura sicura dei file.
 
 ## Requisiti di Sistema
 
-Prima di avviare il progetto, assicurarsi di avere installati:
-- .NET 10.0 SDK
-- Go 1.21 o superiore
-- Python 3.10 o superiore
+Prima di clonare o avviare il progetto, assicurati di avere installati:
+- **.NET 10.0 SDK** (per l'interfaccia C#)
+- **Go 1.21** o superiore (per il Watchdog)
+- **Python 3.10** o superiore (per l'analizzatore)
+- **MSYS2 con GCC/g++** (per compilare il modulo C++). Di default, il progetto cercherà il compilatore nel percorso `C:\msys64\ucrt64\bin\g++.exe`. Se installato altrove, assicurati che `g++` sia accessibile nelle variabili d'ambiente (PATH).
 
-Tutti e tre devono essere accessibili da terminale (cioe' presenti nel PATH di sistema).
+Tutti gli strumenti (escluso g++ se nel percorso standard) devono essere accessibili da terminale.
 
-## Guida all'avvio
+## Guida all'avvio (Import ed Esecuzione)
 
-Il progetto si avvia con un solo comando. La compilazione del modulo Go e' automatica.
+Il progetto è progettato per essere compilato ed eseguito con **un solo comando**. Il sistema di build (MSBuild) è stato istruito per compilare automaticamente i moduli C++ e Go prima di avviare l'interfaccia.
 
-1. Aprire un terminale nella cartella `CSharp`
-2. Lanciare il comando: `dotnet run`
+1. Clona la repository sul tuo PC locale.
+2. Apri un terminale e spostati nella cartella `CSharp`:
+   ```bash
+   cd "ByteGuard/CSharp"
+   ```
+3. Lancia il comando di avvio:
+   ```bash
+   dotnet run
+   ```
 
-Il sistema di build di C# compilera' automaticamente il modulo Go prima di avviare l'applicazione. Non e' necessario eseguire `go build` manualmente.
+*In alternativa*: Puoi aprire il file `ByteGuard.csproj` con **Visual Studio 2022** e premere `F5` per avviare il debug. 
 
-In alternativa, aprire il file `ByteGuard.csproj` con Visual Studio e premere F5.
+*(La compilazione copierà automaticamente gli eseguibili `watchdog.exe` e `ByteGuardCrypto.exe`, oltre allo script Python, nella cartella finale `bin/Debug` per rendere l'applicativo portatile).*
 
-## Struttura del progetto e file principali
+## Come si usa l'App
 
-- Eseguibile compilato:
-  L'eseguibile finale si trovera' in `CSharp/bin/Debug/net10.0-windows/ByteGuard.exe`.
-  NOTA: lo script `analyzer.py` viene copiato automaticamente in questa cartella durante la build.
+Una volta avviata, l'interfaccia si divide in due sezioni principali accessibili dal menu laterale:
 
-- Modulo Go (Watchdog):
-  L'eseguibile `watchdog.exe` viene compilato automaticamente nella cartella `watchdog-go/` ad ogni build.
+### 1. Analisi Forense (Analysis)
+Questa sezione permette di scovare file sospetti, file offuscati, o malware camuffati da documenti innocui.
+- **Analisi Manuale**: Trascina uno o più file all'interno del riquadro tratteggiato, oppure clicca su "Seleziona File". Python calcolerà l'entropia del file e verificherà se l'estensione (es. `.pdf`) coincide davvero con la sua firma binaria interna (Magic Bytes).
+- **Watchdog in Tempo Reale**: Clicca su "Monitora Cartella" e seleziona una directory (es. la cartella Download). Il modulo Go si piazzerà in ascolto, intercettando immediatamente qualsiasi file scaricato o modificato. Passerà il file a Python e la tabella si aggiornerà in tempo reale.
+- **Allarmi Visivi**: I file anomali (es. un eseguibile rinominato in `.txt`, file con entropia troppo alta/cifrati, o con doppie estensioni come `fattura.pdf.exe`) verranno portati in cima alla lista e segnalati in rosso.
 
-- File di log:
-  Se il modulo Python lancia dei warning durante l'analisi, questi vengono salvati in `Python/byteguard_warnings.log`.
+### 2. Cassaforte Crittografica (Crypto)
+Questa sezione ti permette di blindare file sensibili usando il motore C++.
+- **Cifratura**: Seleziona uno o più file, inserisci una chiave di sicurezza (password) e clicca su "Cifra File". Il modulo C++ produrrà delle versioni protette e non leggibili dei tuoi file, salvandole con estensione `.lock`.
+- **Decifratura**: Seleziona i file `.lock`, inserisci la password usata in precedenza e clicca su "Decifra File". Se la password è corretta e il file non è stato manomesso, verrà ripristinato al suo stato originale.
 
-- Moduli:
-  - `CSharp/`: Contiene la UI e la logica di gestione.
-  - `Python/`: Contiene `analyzer.py`, lo script per il calcolo dell'entropia e l'analisi dei magic bytes.
-  - `watchdog-go/`: Contiene il codice Go per il monitoraggio concorrente delle cartelle.
+## Struttura delle Cartelle
+- `CSharp/`: UI e logica di orchestrazione (Interfaccia).
+- `core-cpp/`: Motore crittografico in C++ (`ByteGuardCrypto.exe`).
+- `Python/`: Motore forense (`analyzer.py`).
+- `watchdog-go/`: Pool concorrente per il monitoraggio cartelle (`watchdog.exe`).
