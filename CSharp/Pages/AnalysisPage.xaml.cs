@@ -80,7 +80,7 @@ namespace ByteGuard.Pages
             
             if (e.Data.GetData(DataFormats.FileDrop) is string[] droppedItems && droppedItems.Length > 0)
             {
-                var filesToProcess = ResolveFiles(droppedItems);
+                var filesToProcess = ResolveFiles(droppedItems).ToList();
                 if (filesToProcess.Any())
                     await RunManualAnalysisAsync(filesToProcess);
                 else
@@ -333,35 +333,60 @@ namespace ByteGuard.Pages
         }
 
         // Estraggo i file dalle cartelle scartando le estensioni che non ci interessano
-        private List<string> ResolveFiles(IEnumerable<string> paths)
+        // OTTIMIZZAZIONE: Uso IEnumerable e yield return (Lazy Evaluation) con EnumerateFiles.
+        // Questo evita di caricare un array gigante in RAM se l'utente trascina una cartella con 100.000 file.
+        private IEnumerable<string> ResolveFiles(IEnumerable<string> paths)
         {
-            var files = new List<string>();
             foreach (var path in paths)
             {
                 if (File.Exists(path))
                 {
-                    // Aggiunge il file solo se l'estensione è supportata
+                    // Restituisce il file solo se l'estensione è supportata
                     if (SupportedExtensions.Contains(Path.GetExtension(path)))
-                        files.Add(path);
+                        yield return path;
                 }
                 else if (Directory.Exists(path))
                 {
+                    // Per le directory, usiamo un iteratore manuale per poter intercettare e scartare
+                    // eventuali UnauthorizedAccessException sulle singole sottocartelle di sistema
+                    IEnumerator<string> enumerator = null;
                     try
                     {
-                        // Estrae tutti i file e filtra solo quelli supportati
-                        var validFiles = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories)
-                                                  .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)));
-                        files.AddRange(validFiles);
+                        enumerator = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories).GetEnumerator();
                     }
                     catch (UnauthorizedAccessException ex)
                     {
-                        // Silenziamo l'errore per cartelle di sistema a cui non abbiamo accesso.
-                        // Aggiungiamo un log diagnostico per non perdere traccia del problema a livello di debug.
-                        Debug.WriteLine($"[ByteGuard] Accesso negato alla cartella: {path} - Dettaglio: {ex.Message}");
+                        Debug.WriteLine($"[ByteGuard] Accesso negato alla cartella principale: {path} - Dettaglio: {ex.Message}");
+                        continue;
                     }
+
+                    bool hasNext = true;
+                    while (hasNext)
+                    {
+                        try
+                        {
+                            hasNext = enumerator.MoveNext();
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            // Ignora la singola sottocartella protetta e prova a proseguire (se l'enumeratore lo permette)
+                            continue;
+                        }
+                        catch (Exception)
+                        {
+                            hasNext = false;
+                        }
+
+                        if (hasNext)
+                        {
+                            string currentFile = enumerator.Current;
+                            if (SupportedExtensions.Contains(Path.GetExtension(currentFile)))
+                                yield return currentFile;
+                        }
+                    }
+                    enumerator?.Dispose();
                 }
             }
-            return files;
         }
 
         // ======================================================================
