@@ -13,8 +13,6 @@ using ByteGuard.Services;
 
 namespace ByteGuard.Pages
 {
-    // Uso una classe semplice. Per aggiornare la UI chiamo manualmente FilesDataGrid.Items.Refresh()
-    // invece di usare robe più complesse come INotifyPropertyChanged che non mi servono qui.
     public class CryptoFileItem
     {
         public string FilePath { get; set; } = string.Empty;
@@ -26,14 +24,14 @@ namespace ByteGuard.Pages
     {
         public ObservableCollection<CryptoFileItem> CryptoQueue { get; set; }
 
-        // Il servizio che parla con ByteGuardCrypto.exe
+        // Servizio che incapsula la comunicazione inter-processo (IPC) con ByteGuardCrypto.exe (C++)
         private readonly CppCryptoService _cryptoService;
 
         public CryptoPage()
         {
             InitializeComponent();
             CryptoQueue = new ObservableCollection<CryptoFileItem>();
-            // Aggiorno il contatore ogni volta che la coda cambia
+            // Sfrutto un event handler "anonimo" (Lambda Expression) per aggiornare il contatore della coda.
             CryptoQueue.CollectionChanged += (_, _) => TxtQueueCount.Text = CryptoQueue.Count.ToString();
             FilesDataGrid.ItemsSource = CryptoQueue;
             _cryptoService = new CppCryptoService();
@@ -66,6 +64,7 @@ namespace ByteGuard.Pages
         private void DropZone_Drop(object sender, DragEventArgs e)
         {
             DropZone_DragLeave(sender, e);
+            // Come in AnalysisPage, applico il Declaration Pattern per la type safety in fase di unboxing dell'evento.
             if (e.Data.GetData(DataFormats.FileDrop) is string[] droppedItems)
                 AddFilesToQueue(droppedItems);
         }
@@ -83,8 +82,8 @@ namespace ByteGuard.Pages
 
         private void AddFilesToQueue(string[] paths)
         {
-            // Uso un iteratore per consumare i file man mano che li trovo,
-            // esplorando anche le sottocartelle in modo ricorsivo.
+            // Consumo l'iteratore generato da GetFilesDaPercorso.
+            // Uso LINQ (Any) per evitare l'inserimento di duplicati.
             foreach (var file in GetFilesDaPercorso(paths))
             {
                 if (!CryptoQueue.Any(x => x.FilePath == file))
@@ -92,8 +91,9 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Uso yield return per scorrere i file uno ad uno senza allocare array giganti in RAM.
-        // È molto utile se l'utente seleziona una cartella con migliaia di file.
+        // OTTIMIZZAZIONE ALGORITMICA: Uso yield return (Lazy Evaluation) per iterare i file.
+        // Restituendo un IEnumerable invece di costruire una List<string>, evito del tutto 
+        // l'allocazione massiva di memoria nel caso in cui l'utente scelga cartelle enormi.
         private IEnumerable<string> GetFilesDaPercorso(string[] paths)
         {
             foreach (var path in paths)
@@ -104,6 +104,7 @@ namespace ByteGuard.Pages
                 }
                 else if (Directory.Exists(path))
                 {
+                    // La chiamata ad EnumerateFiles è essa stessa lazy.
                     foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
                     {
                         yield return file;
@@ -137,11 +138,12 @@ namespace ByteGuard.Pages
 
         // ======================================================================
         // OPERAZIONI CRITTOGRAFICHE
-        // Ogni file viene passato uno alla volta a ByteGuardCrypto.exe.
-        // La password inserita nel popup viene usata per tutta la selezione corrente.
+        // Ogni file viene elaborato in modo indipendente, inoltrando il lavoro a ByteGuardCrypto.exe (C++).
         // ======================================================================
 
-        // Metodo async così l'interfaccia non si blocca mentre il C++ lavora.
+        // Ho marcato il metodo come "async" per poter usare l'operatore "await".
+        // Senza TAP (Task-based Asynchronous Pattern), il thread UI si congelerebbe (frezeerebbe)
+        // in attesa che il processo C++ finisca di crittografare gigabyte di file.
         private async void BtnEncrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
@@ -155,27 +157,29 @@ namespace ByteGuard.Pages
             {
                 string key = dialog.Password;
 
-                // Itero file per file: ogni file è una chiamata indipendente al C++
+                // Itero file per file: ogni file è una chiamata indipendente.
                 foreach (var item in CryptoQueue.ToList())
                 {
                     item.Status = "Cifratura in corso...";
                     FilesDataGrid.Items.Refresh();
 
-                    // Sposto il lavoro pesante su un thread in background per lasciare libera la UI.
+                    // Sposto il lavoro pesante di I/O (la chiamata al C++) su un thread in background gestito dal ThreadPool (Task.Run).
+                    // In questo modo, il thread della UI è istantaneamente libero di disegnare la progress bar o l'hover sui bottoni.
                     await Task.Run(async () =>
                     {
-                        // Isolo l'eccezione del singolo file così se uno fallisce,
-                        // il ciclo continua con il prossimo senza bloccarsi.
+                        // Incapsulo il singolo task in un blocco try/catch: se il C++ va in crash su un file specifico,
+                        // non voglio che l'intero ciclo di elaborazione degli altri file si interrompa bruscamente.
                         try
                         {
                             var result = await _cryptoService.EncryptAsync(item.FilePath, key);
 
-                            // Siccome siamo in background, uso Dispatcher per toccare la UI
+                            // Visto che siamo dentro Task.Run (su un thread di background), non posso toccare direttamente i controlli WPF (la DataGrid).
+                            // Uso Dispatcher.Invoke per "rimbalzare" la chiamata sul thread principale (il thread UI) in modo thread-safe.
                             Dispatcher.Invoke(() =>
                             {
                                 if (result.Success)
                                 {
-                                    // Mostro il nome del file .lock prodotto dal C++
+                                    // Mostro il nome del file .lock (Append .lock all'estensione originale).
                                     string lockName = Path.GetFileName(result.OutputFile);
                                     item.Status = $"Cifrato → {lockName}";
                                 }
@@ -188,7 +192,6 @@ namespace ByteGuard.Pages
                         }
                         catch (Exception ex)
                         {
-                            // Se esplode qualcosa (es. exe non trovato), segnamo l'errore e andiamo avanti
                             Dispatcher.Invoke(() =>
                             {
                                 item.Status = $"Errore: {ex.Message}";
@@ -200,7 +203,7 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Come sopra, metodo async per non bloccare l'interfaccia.
+        // Il processo di decifratura segue la stessa identica architettura asincrona (TAP) usata in BtnEncrypt_Click.
         private async void BtnDecrypt_Click(object sender, RoutedEventArgs e)
         {
             if (CryptoQueue.Count == 0)
@@ -221,7 +224,6 @@ namespace ByteGuard.Pages
 
                     await Task.Run(async () =>
                     {
-                        // Isolo l'eccezione del singolo file
                         try
                         {
                             var result = await _cryptoService.DecryptAsync(item.FilePath, key);
@@ -230,8 +232,9 @@ namespace ByteGuard.Pages
                             {
                                 if (result.Success)
                                 {
-                                    // Il C++ verifica il checksum FNV-1a: se la chiave è sbagliata
-                                    // o il file è stato manomesso, result.Success sarà false.
+                                    // Il C++ calcola e verifica rigorosamente l'hash FNV-1a.
+                                    // Se la password è sbagliata o il file binario è stato alterato, 
+                                    // l'eseguibile C++ lo segnala e result.Success è false.
                                     string restoredName = Path.GetFileName(result.OutputFile);
                                     item.Status = $"Decifrato → {restoredName}";
                                 }

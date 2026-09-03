@@ -1,5 +1,7 @@
 // ByteGuard - AnalysisPage.xaml.cs (Code-Behind)
-// Gestisce la pagina di analisi forense: file singoli via Python, cartelle via Go Watchdog.
+// In questo modulo gestisco la UI della pagina di analisi forense.
+// Ho applicato massicciamente il Task-based Asynchronous Pattern (TAP) per non bloccare mai la UI
+// e i principi di programmazione funzionale (come LINQ) per la manipolazione dei dati.
 
 using System;
 using System.Collections.Generic;
@@ -22,14 +24,16 @@ namespace ByteGuard.Pages
     {
         private readonly PythonAnalyzerService _analyzerService;
         
-        // Riferimento al processo Go Watchdog, per poterlo terminare manualmente
+        // Riferimento al processo Go Watchdog per consentirne l'arresto forzato
         private Process? _watchdogProcess;
 
-        // ObservableCollection è essenziale in WPF: notifica automaticamente
-        // la DataGrid ogni volta che viene aggiunto un nuovo elemento.
+        // Uso ObservableCollection (e non una semplice List) perché implementa nativamente INotifyCollectionChanged.
+        // Questo permette alla DataGrid WPF di aggiornarsi automaticamente quando aggiungo o rimuovo un AnalysisResult,
+        // senza dover scrivere codice per forzare il refresh visivo (Pattern MVVM-like).
         public ObservableCollection<AnalysisResult> ScannedFiles { get; } = new ObservableCollection<AnalysisResult>();
 
-        // Lista delle estensioni che supportiamo. Quello che non è qui dentro viene scartato per evitare falsi positivi.
+        // HashSet offre un tempo di ricerca O(1). È la scelta ottimale dal punto di vista algoritmico
+        // per controllare se l'estensione di un file rientra tra quelle supportate.
         private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".jpeg", ".png",
@@ -37,7 +41,7 @@ namespace ByteGuard.Pages
             ".txt", ".json", ".xml", ".csv", ".html"
         };
 
-        // Palette Colori
+        // Palette Colori per la UI
         private static readonly SolidColorBrush BrushOk      = new SolidColorBrush(Color.FromRgb(0x2E, 0xCC, 0x71));
         private static readonly SolidColorBrush BrushWarning = new SolidColorBrush(Color.FromRgb(0xF3, 0x9C, 0x12));
         private static readonly SolidColorBrush BrushDanger  = new SolidColorBrush(Color.FromRgb(0xE7, 0x4C, 0x3C));
@@ -78,7 +82,11 @@ namespace ByteGuard.Pages
         {
             DropZone_DragLeave(sender, e);
             
-            if (e.Data.GetData(DataFormats.FileDrop) is string[] droppedItems && droppedItems.Length > 0)
+            // Uso il Declaration Pattern (is string[] droppedItems) introdotto in C# 7.
+            // È molto più sicuro e pulito di un cast esplicito, previene le eccezioni a runtime
+            // e dichiara la variabile contestualmente.
+            if (e.Data.GetDataPresent(DataFormats.FileDrop) && 
+                e.Data.GetData(DataFormats.FileDrop) is string[] droppedItems)
             {
                 var filesToProcess = ResolveFiles(droppedItems).ToList();
                 if (filesToProcess.Any())
@@ -128,7 +136,15 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Avvia il processo Go in background e ne intercetta l'output riga per riga.
+        private void BtnClearList_Click(object sender, RoutedEventArgs e)
+        {
+            ScannedFiles.Clear();
+            TxtAnomalyCount.Text = "Anomalie: 0";
+            ShowBlankDetails();
+        }
+
+        // Il metodo StartWatchdogAsync è il cuore dell'IPC (Inter-Process Communication) asincrona.
+        // Avvia l'eseguibile Go in background e ne intercetta l'output riga per riga (stdout).
         private async Task StartWatchdogAsync(string folder)
         {
             // Grazie all'istruzione Copy nel .csproj, il binario si trova nella cartella base dell'eseguibile.
@@ -172,7 +188,10 @@ namespace ByteGuard.Pages
             {
                 _watchdogProcess.Start();
 
-                // Ascolto continuo dello stdout riga per riga (streaming JSON da Go)
+                // Ascolto continuo dello stdout riga per riga (streaming JSON da Go).
+                // Paradigma I/O Asincrono Concorrente (TAP): ReadLineAsync non blocca il thread UI.
+                // Restituisce un Task che viene "awaitato". Il thread della UI è libero di gestire i click
+                // finché il sistema operativo non segnala che c'è una nuova riga JSON da leggere nel buffer.
                 using var reader = _watchdogProcess.StandardOutput;
                 string? line;
                 while ((line = await reader.ReadLineAsync()) != null)
@@ -207,8 +226,9 @@ namespace ByteGuard.Pages
             }
         }
 
-        // Esegue il parsing polimorfico degli eventi Go utilizzando JsonDocument
-        // per evitare l'overhead di definire gerarchie complesse di DTO.
+        // Esegue il parsing polimorfico degli eventi Go utilizzando JsonDocument.
+        // Successivamente, applico un costrutto switch classico per instradare gli eventi JSON generati da Go.
+        // Questo approccio mi permette di mantenere il codice leggibile senza creare gerarchie di DTO ridondanti.
         private void DispatchGoEvent(string jsonLine)
         {
             using JsonDocument doc = JsonDocument.Parse(jsonLine);
@@ -235,7 +255,7 @@ namespace ByteGuard.Pages
 
                 case "file_deleted":
                     // Un file che stavamo monitorando è stato eliminato dalla cartella.
-                    // Lo rimuoviamo dalla griglia se è presente.
+                    // Uso LINQ (FirstOrDefault) per trovare il file nella collezione in modo funzionale e pulito.
                     string? deletedFile = root.GetProperty("file").GetString();
                     if (deletedFile != null)
                     {
@@ -254,6 +274,12 @@ namespace ByteGuard.Pages
                 case "analysis_completed":
                     // Converto il risultato direttamente nella mia classe AnalysisResult
                     var resultElement = root.GetProperty("result");
+                    
+                    // Se Python ha ignorato il file (estensione non supportata), scartiamo l'evento silenziando i falsi positivi
+                    if (resultElement.TryGetProperty("analysis_status", out var statusProp) && statusProp.GetString() == "ignored")
+                    {
+                        break;
+                    }
                     
                     var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
                     var result = resultElement.Deserialize<ByteGuard.Services.AnalysisResult>(options);
@@ -315,7 +341,7 @@ namespace ByteGuard.Pages
         {
             Dispatcher.InvokeAsync(() =>
             {
-                // Se il file era già in lista lo rimuovo prima di reinserirlo aggiornato
+                // Uso LINQ per la ricerca del file esistente
                 var existing = ScannedFiles.FirstOrDefault(r => r.FilePath == result.FilePath);
                 if (existing != null)
                     ScannedFiles.Remove(existing);
@@ -326,15 +352,17 @@ namespace ByteGuard.Pages
                 else
                     ScannedFiles.Add(result);
 
-                // Ricalcolo il contatore delle anomalie ogni volta
+                // Uso la Lambda Expression all'interno del metodo LINQ Count per calcolare le anomalie
                 int anomalyCount = ScannedFiles.Count(r => r.IsAnomalous);
                 TxtAnomalyCount.Text = $"Anomalie: {anomalyCount}";
             });
         }
 
-        // Estraggo i file dalle cartelle scartando le estensioni che non ci interessano
-        // OTTIMIZZAZIONE: Uso IEnumerable e yield return (Lazy Evaluation) con EnumerateFiles.
-        // Questo evita di caricare un array gigante in RAM se l'utente trascina una cartella con 100.000 file.
+        // Estraggo i file dalle cartelle scartando le estensioni che non ci interessano.
+        // OTTIMIZZAZIONE ALGORITMICA: Ho applicato i principi di Programmazione Funzionale e Lazy Evaluation
+        // restituendo un IEnumerable<string> e usando la keyword "yield return" assieme a Directory.EnumerateFiles.
+        // Questo differisce nettamente dall'uso di GetFiles() perché non costruisce un array gigante in RAM 
+        // qualora l'utente dovesse selezionare una cartella con 100.000 file, ma li serve "on-demand" al consumatore.
         private IEnumerable<string> ResolveFiles(IEnumerable<string> paths)
         {
             foreach (var path in paths)
@@ -392,6 +420,8 @@ namespace ByteGuard.Pages
         // ======================================================================
         // ANALISI MANUALE (Per file singoli scelti dall'utente)
         // ======================================================================
+        // Esegue l'analisi di una lista di file (usato per il drag&drop o seleziona file).
+        // Per evitare di bloccare la UI, applico il pattern TAP dividendo i file in "chunk" (gruppi).
         private async Task RunManualAnalysisAsync(List<string> filePaths)
         {
             SetUiAnalyzing(filePaths.Count);
@@ -406,6 +436,9 @@ namespace ByteGuard.Pages
             {
                 foreach (var chunk in filePaths.Chunk(chunkSize))
                 {
+                    // L'utilizzo di Task.WhenAll permette di parallelizzare il carico su più thread, 
+                    // inviando più file a Python simultaneamente (Parallelismo Concorrente) e attendendone il completamento
+                    // senza causare il freezing dell'applicazione WPF.
                     var tasks = chunk.Select(async filePath =>
                     {
                         AnalysisResult result;
@@ -439,6 +472,9 @@ namespace ByteGuard.Pages
 
                     foreach (var result in results)
                     {
+                        if (result.AnalysisStatus == "ignored")
+                            continue; // File non supportato: lo scartiamo in modo trasparente
+
                         if (result.IsAnomalous)
                         {
                             ScannedFiles.Insert(0, result);

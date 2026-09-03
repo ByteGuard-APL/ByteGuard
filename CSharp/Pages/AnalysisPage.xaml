@@ -88,6 +88,10 @@
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="border" Property="Background" Value="#96281B"/>
                             </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="border" Property="Background" Value="#3A3A5C"/>
+                                <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                            </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -147,7 +151,19 @@
                             <TextBlock x:Name="TxtDropPrompt" Text="Trascina file o cartelle qui" Foreground="{StaticResource TextPrimary}" FontWeight="SemiBold" HorizontalAlignment="Center" IsHitTestVisible="False"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
                                 <Button x:Name="BtnBrowseFile" Content="Sfoglia File..." Style="{StaticResource PrimaryButtonStyle}" Click="BtnBrowseFile_Click" Margin="0,0,10,0"/>
-                                <Button x:Name="BtnBrowseFolder" Content="&#x1F4C1; Monitora Cartella..." Style="{StaticResource PrimaryButtonStyle}" Click="BtnBrowseFolder_Click"/>
+                                <Button x:Name="BtnBrowseFolder" Content="&#x1F4C1; Monitora Cartella..." Style="{StaticResource PrimaryButtonStyle}" Click="BtnBrowseFolder_Click" Margin="0,0,10,0"/>
+                                <Button x:Name="BtnClearList" Content="&#x1F5D1; Svuota Lista" Click="BtnClearList_Click">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource DangerButtonStyle}">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ElementName=FilesDataGrid, Path=HasItems}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
                             </StackPanel>
                         </StackPanel>
                     </Border>

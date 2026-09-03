@@ -1,6 +1,5 @@
 // ByteGuard - PythonService.cs
-// Classe per gestire l'avvio di Python e leggere i suoi risultati in JSON.
-// Riceve l'output, lo parsa e lo butta dentro il record AnalysisResult.
+// Interfaccia IPC asincrona per invocare il motore di analisi forense Python.
 
 using System;
 using System.Diagnostics;
@@ -11,8 +10,10 @@ using System.Threading.Tasks;
 
 namespace ByteGuard.Services
 {
-    // Uso un record invece di una classe perché serve solo a contenere dati che ricevo da Python
-    // e non li devo modificare in giro per il codice. Inoltre mappa lo snake_case di Python nel nostro PascalCase.
+    // Come per CppCryptoService, utilizzo un 'record' con init-only properties per garantire
+    // l'Immutabilità del dato, conformemente ai dettami della Programmazione Funzionale.
+    // L'attributo [JsonPropertyName] agisce da mapper formale tra la convenzione snake_case di Python
+    // e la convenzione PascalCase standard di C#.
     public record AnalysisResult
     {
         [JsonPropertyName("file_path")]
@@ -24,11 +25,9 @@ namespace ByteGuard.Services
         [JsonPropertyName("declared_extension")]
         public string? DeclaredExtension { get; init; }
 
-        // Entropia da 0 a 8. Se è troppo alta (tipo > 7) puzza di file criptato o compresso male.
         [JsonPropertyName("shannon_entropy")]
         public double ShannonEntropy { get; init; }
 
-        // Vero se il file era troppo grosso e l'ho campionato per non metterci una vita.
         [JsonPropertyName("entropy_sampled")]
         public bool EntropySampled { get; init; }
 
@@ -38,11 +37,9 @@ namespace ByteGuard.Services
         [JsonPropertyName("magic_number_ascii")]
         public string? MagicNumberAscii { get; init; }
 
-        // Falso se l'estensione è fake (es. un .exe mascherato da .pdf).
         [JsonPropertyName("extension_match")]
         public bool ExtensionMatch { get; init; }
 
-        // Da guardare subito: può essere "success" o "error".
         [JsonPropertyName("analysis_status")]
         public string AnalysisStatus { get; init; } = "error";
 
@@ -52,14 +49,12 @@ namespace ByteGuard.Services
         [JsonPropertyName("timestamp_utc")]
         public string TimestampUtc { get; init; } = string.Empty;
 
-        // Flag calcolato dal motore Python per evidenziare visivamente la riga
         [JsonPropertyName("is_anomalous")]
         public bool IsAnomalous { get; init; }
 
         [JsonPropertyName("has_double_extension")]
         public bool HasDoubleExtension { get; init; }
 
-        // Testo esplicativo dell'anomalia determinato dal motore Python
         [JsonPropertyName("verdict")]
         public string Verdict { get; init; } = "Sano";
 
@@ -71,18 +66,17 @@ namespace ByteGuard.Services
     {
         private readonly string _pythonExecutable;
         private readonly string _analyzerScriptPath;
-
-        // Creo le opzioni JSON una volta sola nel costruttore così è più veloce e non le ricreo ad ogni analisi.
         private readonly JsonSerializerOptions _jsonOptions;
 
         public PythonAnalyzerService(string pythonExecutable = "python", string? analyzerScriptPath = null)
         {
             _pythonExecutable = pythonExecutable;
 
-            // Uso BaseDirectory così i percorsi funzionano sia da VS Studio che avviando l'exe normalmente.
+            // Assicuro la corretta risoluzione del percorso dello script Python a prescindere dal working directory d'avvio (es. da Visual Studio)
             _analyzerScriptPath = analyzerScriptPath
                 ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Python", "analyzer.py");
 
+            // Cache delle options per la deserializzazione JSON ad alte prestazioni
             _jsonOptions = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
@@ -91,41 +85,41 @@ namespace ByteGuard.Services
             };
         }
 
-        // Lancia Python passandogli il file e mi restituisce l'oggetto deserializzato pronto all'uso.
+        // Metodo asincrono basato su TAP per l'esecuzione del processo Python.
         public async Task<AnalysisResult> AnalyzeFileAsync(string filePath)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = _pythonExecutable,
-                // Uso ArgumentList per non impazzire con gli spazi nei percorsi dei file.
                 RedirectStandardOutput = true,
                 RedirectStandardError  = true,
-                UseShellExecute        = false,  // obbligatorio per redirigere I/O
+                UseShellExecute        = false, 
                 CreateNoWindow         = true,
-                // Forzo UTF-8 altrimenti i caratteri strani o accentati mi sballano il JSON.
                 StandardOutputEncoding = System.Text.Encoding.UTF8,
                 StandardErrorEncoding  = System.Text.Encoding.UTF8,
             };
 
+            // ArgumentList garantisce la sanitizzazione automatica dei percorsi con spazi
             startInfo.ArgumentList.Add(_analyzerScriptPath);
             startInfo.ArgumentList.Add(filePath);
 
-            // Uso using così se crasha tutto libero la memoria del processo (evito processi zombie)
+            // Pattern 'using' per smaltire il puntatore nativo dell'OS al processo al termine dello scope
             using var process = new Process { StartInfo = startInfo };
             process.Start();
 
-            // Leggo output ed errori in parallelo per evitare che la pipe si intasi e si blocchi tutto all'infinito.
+            // Come visto a lezione per la concorrenza, prevengo attivamente scenari di Deadlock dell'I/O
+            // svuotando concorrentemente entrambi i buffer (stdout e stderr) usando Task.WhenAll.
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             await Task.WhenAll(stdoutTask, stderrTask);
 
-            // Aspetto che Python si chiuda DOPO aver letto tutto.
+            // Attendo la chiusura effettiva (graceful exit)
             await process.WaitForExitAsync();
 
             string jsonOutput   = stdoutTask.Result.Trim();
             string stderrOutput = stderrTask.Result.Trim();
 
-            // Se Python non stampa nulla vuol dire che è crashato malissimo (es. errore di sintassi).
+            // Validazione dello standard output
             if (string.IsNullOrWhiteSpace(jsonOutput))
             {
                 string msg = string.IsNullOrWhiteSpace(stderrOutput)
@@ -134,7 +128,7 @@ namespace ByteGuard.Services
                 throw new InvalidOperationException(msg);
             }
 
-            // Se per caso Deserialize mi dà null, lancio un'eccezione per non impazzire a cercare l'errore dopo.
+            // Deserializzazione del JSON raw direttamente nell'oggetto record immutabile
             AnalysisResult result = JsonSerializer.Deserialize<AnalysisResult>(jsonOutput, _jsonOptions)
                 ?? throw new JsonException("La deserializzazione ha restituito null inatteso.");
 

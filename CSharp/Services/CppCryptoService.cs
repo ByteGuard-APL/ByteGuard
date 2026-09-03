@@ -1,6 +1,7 @@
 // ByteGuard - CppCryptoService.cs
-// Chiama l'eseguibile C++ (ByteGuardCrypto.exe) come sottoprocesso per cifrare e decifrare i file.
-// Funziona esattamente come PythonAnalyzerService: avvio il processo, leggo il JSON dallo stdout e lo deserializzo.
+// Interfaccia IPC (Inter-Process Communication) per invocare l'eseguibile C++ (ByteGuardCrypto.exe).
+// Come studiato, ho incapsulato la logica di invocazione in una classe servizio dedicata,
+// disaccoppiando la UI dal sottosistema crittografico.
 
 using System;
 using System.Diagnostics;
@@ -12,27 +13,25 @@ using System.Threading.Tasks;
 
 namespace ByteGuard.Services
 {
-    // Il risultato che ByteGuardCrypto.exe stampa su stdout in formato JSON.
-    // Uso un record perché i dati arrivano dall'esterno e non li modifico mai.
+    // Ho scelto di usare il costrutto 'record' invece di una 'class' convenzionale.
+    // I record promuovono la Programmazione Funzionale offrendo Immutabilità di default (grazie a 'init').
+    // Poiché questi dati provengono dall'esterno tramite JSON e non devono mai essere alterati a runtime,
+    // il record è la struttura dati perfetta e thread-safe.
     public record CryptoOperationResult
     {
-        // "success" o "error"
         [JsonPropertyName("status")]
         public string Status { get; init; } = "error";
 
-        // Messaggio leggibile che spiega cosa è successo (o cosa è andato storto)
         [JsonPropertyName("message")]
         public string Message { get; init; } = string.Empty;
 
-        // Percorso del file originale passato al C++
         [JsonPropertyName("original_file")]
         public string OriginalFile { get; init; } = string.Empty;
 
-        // Percorso del file prodotto (es. documento.txt.lock); vuoto in caso di errore
         [JsonPropertyName("output_file")]
         public string OutputFile { get; init; } = string.Empty;
 
-        // Proprietà di comodo per non dover confrontare stringhe in giro per il codice
+        // Expression-bodied member per calcolare lo stato senza allocare un field
         public bool Success => Status == "success";
     }
 
@@ -43,27 +42,24 @@ namespace ByteGuard.Services
 
         public CppCryptoService(string? executablePath = null)
         {
-            // Grazie alla copia nel .csproj, l'eseguibile C++ si trova ora direttamente
-            // nella cartella di build di ByteGuard.exe (bin/Debug).
+            // Ottengo dinamicamente la BaseDirectory (la cartella bin/Debug in dev)
+            // in cui CMake ha copiato l'eseguibile C++.
             _executablePath = executablePath
                 ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ByteGuardCrypto.exe");
 
-            // Creo le opzioni una volta sola per non ricrearle ad ogni chiamata
+            // Cache delle opzioni JSON per ottimizzare le allocazioni di memoria
             _jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         }
 
-        // Cifra un file: il C++ crea <nomefile>.lock e lascia l'originale intatto
         public async Task<CryptoOperationResult> EncryptAsync(string filePath, string key)
             => await RunAsync("--encrypt", filePath, key);
 
-        // Decifra un file .lock: il C++ verifica il checksum FNV-1a prima di procedere.
-        // Se la chiave è sbagliata o il file è stato manomesso, restituisce success=false.
         public async Task<CryptoOperationResult> DecryptAsync(string filePath, string key)
             => await RunAsync("--decrypt", filePath, key);
 
         private async Task<CryptoOperationResult> RunAsync(string operation, string filePath, string key)
         {
-            // Controllo preventivo: se l'exe non esiste, avviso subito invece di andare in crash
+            // Sanity check precoce per evitare crash in fase di avvio del processo
             if (!File.Exists(_executablePath))
                 throw new FileNotFoundException(
                     $"ByteGuardCrypto.exe non trovato in:\n{_executablePath}\n\nAssicurarsi che CMake abbia completato la build.");
@@ -78,18 +74,22 @@ namespace ByteGuard.Services
                 StandardOutputEncoding = Encoding.UTF8,
             };
 
-            // Il C++ vuole: --encrypt (o --decrypt) --key "..." --file "..."
+            // Invece di concatenare stringhe per 'Arguments' (che è prono a bug se i path hanno spazi o apici),
+            // sfrutto la nuova 'ArgumentList' che gestisce automaticamente l'escaping degli argomenti.
             startInfo.ArgumentList.Add(operation);
             startInfo.ArgumentList.Add("--key");
             startInfo.ArgumentList.Add(key);
             startInfo.ArgumentList.Add("--file");
             startInfo.ArgumentList.Add(filePath);
 
-            // Uso using così se il processo crasha libero subito le risorse
+            // Il blocco 'using' assicura che il puntatore nativo al processo venga rilasciato 
+            // determinando la chiamata a Dispose() anche in caso di eccezioni.
             using var process = new Process { StartInfo = startInfo };
             process.Start();
 
-            // Leggo stdout e stderr in parallelo per evitare che la pipe si intasi
+            // OTTIMIZZAZIONE DEADLOCK: Leggo stdout e stderr in parallelo usando Task.WhenAll.
+            // Se leggessi prima tutto lo stdout usando un costrutto sincrono o sequenziale,
+            // un buffer stderr pieno da parte del C++ potrebbe bloccare permanentemente il processo figlio (pipe intasata).
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
             await Task.WhenAll(stdoutTask, stderrTask);
@@ -97,8 +97,6 @@ namespace ByteGuard.Services
 
             string json = stdoutTask.Result.Trim();
 
-            // Il C++ dovrebbe sempre stampare qualcosa su stdout (anche in caso di errore).
-            // Se non stampa nulla è crashato malissimo (es. access violation).
             if (string.IsNullOrWhiteSpace(json))
             {
                 string stderr = stderrTask.Result.Trim();

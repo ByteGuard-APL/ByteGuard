@@ -1,8 +1,9 @@
 """
 ByteGuard - analyzer.py
-Motore di analisi forense. Lanciato da C# come sottoprocesso:
-riceve il percorso di un file via sys.argv[1] e stampa UN SOLO JSON su stdout.
-Nessuna UI, nessuna dipendenza esterna (solo stdlib).
+Motore di analisi forense scritto in Python.
+Viene invocato dal backend C# (o dal Watchdog Go) come processo isolato.
+Riceve il percorso del file come argomento (sys.argv[1]) e stampa ESCLUSIVAMENTE un JSON su stdout.
+Ho scelto di non usare librerie esterne per l'analisi, appoggiandomi solo alla Standard Library di Python.
 """
 
 import sys
@@ -15,34 +16,29 @@ import logging
 import warnings
 
 
-# Su Windows la console usa cp1252 di default, che non copre tutti i caratteri Unicode.
-# Sostituiamo sys.stdout con un wrapper UTF-8 esplicito per evitare UnicodeEncodeError
-# su percorsi con caratteri accentati o simboli nei magic bytes.
+# Per evitare crash durante la lettura di percorsi con caratteri speciali (soprattutto su Windows che usa cp1252),
+# ho forzato lo standard output a usare la codifica UTF-8. Questo garantisce che la comunicazione IPC verso Go o C# non si corrompa.
 try:
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", line_buffering=True)
 except AttributeError:
-    pass  # stdout non e' una pipe (es. esecuzione in unit test): nessun problema
+    pass
 
 
-# Redirigo i warning (es. librerie deprecate) su un file di log separato anziché su stdout.
-# Questo è fondamentale perché lo stdout funge da canale IPC verso il modulo Go,
-# e inserire testo libero comprometterebbe il parsing del JSON.
+# Ho implementato questa configurazione del logger per deviare qualsiasi warning (es. deprecazioni interne di Python)
+# verso un file di log separato ("byteguard_warnings.log"). È vitale perché se un warning finisse su stdout,
+# distruggerebbe la struttura del JSON inviato tramite IPC, mandando in errore il parser di C#.
 log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "byteguard_warnings.log")
 logging.basicConfig(
     filename=log_path,
     level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logging.captureWarnings(True)  # Intercetta tutti i warning di Python e li invia al logger
+logging.captureWarnings(True)
 
 
-# Mappa delle estensioni e dei loro magic bytes attesi.
-# Se il file binario non inizia con questi byte, l'estensione probabilmente è finta.
-#
-# Ho escluso volontariamente i file di testo (.txt, .json, ecc.) perché
-# non hanno magic bytes all'inizio (possono iniziare con spazi o a capo).
-# Quindi per i file di testo faccio il controllo al contrario: verifico che 
-# NON inizino con i magic bytes di file binari noti (es. un .exe rinominato in .txt).
+# Dizionario dei Magic Bytes per le firme dei file.
+# Ho mappato manualmente i byte iniziali che identificano univocamente la reale natura di un file.
+# Nota tecnica: i file di testo (.txt, .json, .csv) non hanno un magic byte standard, quindi li gestirò con una logica a esclusione.
 MAGIC_NUMBERS: dict[str, bytes] = {
     ".pdf":  b"%PDF-",
     ".png":  b"\x89PNG\r\n\x1a\n",
@@ -53,23 +49,23 @@ MAGIC_NUMBERS: dict[str, bytes] = {
     ".dll":  b"MZ",          
     ".sys":  b"MZ",          
     ".elf":  b"\x7fELF",
-    ".docx": b"PK\x03\x04",  
+    ".docx": b"PK\x03\x04",  # Anche i file Office moderni sono sostanzialmente archivi ZIP
     ".xlsx": b"PK\x03\x04",  
     ".gz":   b"\x1f\x8b",
 }
 
-# Leggo solo i primi 16 byte per riconoscere il magic number, che sono sufficienti per le intestazioni comuni.
+# 16 byte sono più che sufficienti per catturare la quasi totalità degli header noti.
 MAGIC_BYTES_READ_COUNT = 16
 
-# Soglia per il campionamento dell'entropia.
-# Se il file è sotto i 100 MB lo leggo interamente per una precisione esatta,
-# altrimenti applico il campionamento per evitare la saturazione della memoria (OOM).
-SAMPLING_THRESHOLD_BYTES = 100 * 1024 * 1024  # 100 MB
+# Ho inserito questa soglia (100 MB) per il campionamento dell'entropia.
+# Se provassi a calcolare l'entropia esatta di un file di svariati Giga caricandolo in RAM, causerei un OutOfMemoryError.
+SAMPLING_THRESHOLD_BYTES = 100 * 1024 * 1024
 
 
 def calculate_shannon_entropy(data: bytes) -> float:
     """
-    Calcola l'entropia di Shannon dei byte del file (range 0.0 - 8.0 bit/simbolo).
+    Calcolo dell'Entropia di Shannon (misura del disordine dei dati).
+    Ho implementato l'algoritmo classico che itera sui byte e calcola le probabilità.
 
     Valori guida:
         < 5.5   -> testo o dati strutturati semplici
@@ -237,6 +233,12 @@ def analyze_magic_numbers(header_bytes: bytes, declared_extension: str) -> dict:
     }
 
 
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".zip", ".gz", ".docx", ".xlsx", ".jpg", ".jpeg", ".png",
+    ".exe", ".elf", ".dll", ".sys",
+    ".txt", ".json", ".xml", ".csv", ".html"
+}
+
 def analyze_file(file_path: str) -> dict:
     """Apre il file in modalita' binaria, calcola entropia e magic numbers, restituisce il payload."""
     abs_path = os.path.abspath(file_path)
@@ -244,6 +246,29 @@ def analyze_file(file_path: str) -> dict:
     _, extension = os.path.splitext(abs_path)
     file_size = os.path.getsize(abs_path)
     
+    ext_lower = extension.lower() if extension else "(none)"
+    
+    # Ignoriamo i file non supportati, restituendo un payload speciale
+    if ext_lower not in SUPPORTED_EXTENSIONS:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "file_path": abs_path,
+            "file_size_bytes": file_size,
+            "declared_extension": ext_lower,
+            "shannon_entropy": 0.0,
+            "entropy_sampled": False,
+            "has_double_extension": False,
+            "magic_number_hex": None,
+            "magic_number_ascii": None,
+            "extension_match": False,
+            "is_anomalous": False,
+            "verdict": "Ignorato (estensione non supportata)",
+            "anomaly_code": "IGNORED",
+            "analysis_status": "ignored",
+            "error_message": None,
+            "timestamp_utc": timestamp,
+        }
+
     has_double_ext = check_double_extension(file_name)
 
     # 'rb' e' obbligatorio: nessuna decodifica testo, legge byte grezzi
