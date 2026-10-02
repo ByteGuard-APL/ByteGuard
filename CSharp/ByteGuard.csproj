@@ -39,7 +39,7 @@
   <Target Name="BuildCppCrypto" BeforeTargets="BuildGoWatchdog">
     <MakeDir Directories="..\core-cpp\build" Condition="!Exists('..\core-cpp\build')" />
     <Message Text="--- ByteGuard: compilazione modulo C++ con g++... ---" Importance="high" />
-    <Exec Command="$(GppPath) -std=c++20 -O2 ..\core-cpp\src\main.cpp ..\core-cpp\src\ByteGuardCrypto.cpp -I..\core-cpp\include -I..\core-cpp\third_party -o ..\core-cpp\build\ByteGuardCrypto.exe"
+    <Exec Command="$(GppPath) -std=c++20 -O2 -static ..\core-cpp\src\main.cpp ..\core-cpp\src\ByteGuardCrypto.cpp -I..\core-cpp\include -I..\core-cpp\third_party -o ..\core-cpp\build\ByteGuardCrypto.exe"
           WorkingDirectory="$(MSBuildProjectDirectory)"
           ConsoleToMSBuild="true"
           ContinueOnError="true" />
